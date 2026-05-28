@@ -105,7 +105,7 @@ with st.sidebar:
     except Exception as e:
         st.error(f"Failed to load data from GitHub. Please check the URL. \n\nError: {e}")
         st.stop()
-st.divider()
+ st.divider()
     st.header("📥 Update Master Database")
     st.write("Upload your new monthly data to merge it with the base file.")
     
@@ -142,6 +142,28 @@ st.divider()
                     
                 st.success(f"✅ Merged successfully! The database grew from {len(raw_base_df)} to {len(updated_master_df)} rows.")
                 
+                # 6. Provide the download button
+                st.download_button(
+                    label="📦 Download New Master File (.zip)",
+                    data=zip_buffer.getvalue(),
+                    file_name="Sales.zip",
+                    mime="application/zip",
+                    help="Download this and drag-and-drop it into your GitHub repo to update the app!"
+                )
+        except Exception as e:
+            st.error(f"Error merging files: {e}")
+
+     
+                # 6. Provide the download button
+                st.download_button(
+                    label="📦 Download New Master File (.zip)",
+                    data=zip_buffer.getvalue(),
+                    file_name="Sales.zip",
+                    mime="application/zip",
+                    help="Download this and drag-and-drop it into your GitHub repo to update the app!"
+                )
+        except Exception as e:
+            st.error(f"Error merging files: {e}")
                 # 6. Provide the download button
                 st.download_button(
                     label="📦 Download New Master File (.zip)",
