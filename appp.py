@@ -7,22 +7,15 @@ import io
 st.set_page_config(page_title="Sales Quantity Checker", layout="wide")
 st.title("📦 Sales Quantity Checker")
 
-# 🔴 REPLACE THIS WITH YOUR ACTUAL GITHUB RAW URL 🔴
+# 🔴 GITHUB RAW URL 🔴
 GITHUB_CSV_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip"
-# 1. Update the URL to point to the .zip fil
 
-# ... inside your load_and_process_backend_data function ...
-
-    # 2. Tell Pandas to unzip the file automatically
-df = pd.read_csv("https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip", compression='zip', low_memory=False, on_bad_lines='skip')
-# --- DATA PROCESSING ---
-@st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
 # --- DATA PROCESSING ---
 @st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
 def load_and_process_backend_data(url):
     """Fetches data from GitHub, filters for last 12 months, and pivots."""
-    # Load directly from GitHub and skip bad rows
-    df = pd.read_csv(url, low_memory=False, on_bad_lines='skip')
+    # Load directly from GitHub and skip bad rows, utilizing compression='zip'
+    df = pd.read_csv(url, compression='zip', low_memory=False, on_bad_lines='skip')
     
     # 1. Clean up column names (removes any accidental hidden spaces)
     df.columns = df.columns.str.strip()
@@ -72,10 +65,6 @@ def load_and_process_backend_data(url):
     pivot_df['Total'] = pivot_df[target_areas].sum(axis=1)
     
     return pivot_df, most_recent_date, twelve_months_ago
-    # Calculate Total
-    pivot_df['Total'] = pivot_df[target_areas].sum(axis=1)
-    
-    return pivot_df, most_recent_date, twelve_months_ago
 
 # --- EXCEL EXPORT HELPER ---
 def convert_df_to_excel(df):
@@ -86,7 +75,7 @@ def convert_df_to_excel(df):
     processed_data = output.getvalue()
     return processed_data
 
-# --- SIDEBAR: SYSTEM STATUS ---
+# --- SIDEBAR: SYSTEM STATUS & UPDATE ---
 with st.sidebar:
     st.header("⚙️ System Status")
     
@@ -105,7 +94,8 @@ with st.sidebar:
     except Exception as e:
         st.error(f"Failed to load data from GitHub. Please check the URL. \n\nError: {e}")
         st.stop()
- st.divider()
+        
+    st.divider()
     st.header("📥 Update Master Database")
     st.write("Upload your new monthly data to merge it with the base file.")
     
@@ -153,27 +143,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error merging files: {e}")
 
-     
-                # 6. Provide the download button
-                st.download_button(
-                    label="📦 Download New Master File (.zip)",
-                    data=zip_buffer.getvalue(),
-                    file_name="Sales.zip",
-                    mime="application/zip",
-                    help="Download this and drag-and-drop it into your GitHub repo to update the app!"
-                )
-        except Exception as e:
-            st.error(f"Error merging files: {e}")
-                # 6. Provide the download button
-                st.download_button(
-                    label="📦 Download New Master File (.zip)",
-                    data=zip_buffer.getvalue(),
-                    file_name="Sales.zip",
-                    mime="application/zip",
-                    help="Download this and drag-and-drop it into your GitHub repo to update the app!"
-                )
-        except Exception as e:
-            st.error(f"Error merging files: {e}")
 # --- MAIN INTERFACE: THE CHECKER ---
 st.write("### Enter Part Numbers")
 st.write("Type or paste your **Part Numbers** below to instantly pull VECV inventory metrics.")
