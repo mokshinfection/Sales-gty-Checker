@@ -146,25 +146,29 @@ with st.sidebar:
 st.write("### Enter Part Numbers")
 st.write("Type or paste your **Part Numbers** below to instantly pull VECV inventory metrics.")
 
-# --- CLEAR BUTTON LOGIC ---
-if st.button("🗑️ Clear List"):
-    # Reset the initial dataframe
-    st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
-    # Delete the widget's internal memory state so it actually refreshes
-    if 'data_editor' in st.session_state:
-        del st.session_state['data_editor']
-    st.rerun()
+# 1. Initialize an editor key in session state if it doesn't exist
+if 'editor_key' not in st.session_state:
+    st.session_state['editor_key'] = 0
 
 if 'input_df' not in st.session_state:
     st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
 
+# --- CLEAR BUTTON LOGIC ---
+if st.button("🗑️ Clear List"):
+    # Reset the initial dataframe
+    st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
+    # 2. Change the key so Streamlit builds a brand new, empty widget
+    st.session_state['editor_key'] += 1
+    st.rerun()
+
+# 3. Use the dynamic key here
 edited_input = st.data_editor(
     st.session_state['input_df'],
     num_rows="dynamic",
     column_config={
         "PartNumber": st.column_config.TextColumn("Part Number (Editable)", required=True)
     },
-    key="data_editor"
+    key=f"data_editor_{st.session_state['editor_key']}" 
 )
 
 if not edited_input.empty:
