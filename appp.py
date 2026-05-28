@@ -10,214 +10,199 @@ st.title("📦 Sales Quantity Checker")
 # 🔴 GITHUB RAW URL 🔴
 GITHUB_CSV_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip"
 
-# --- DATA PROCESSING ---
-@st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
-def load_and_process_backend_data(url):
-    """Fetches data from GitHub, filters for last 12 months, and pivots."""
-    # Load directly from GitHub and skip bad rows, utilizing compression='zip'
+# --- DATA PROCESSING (NOW LOADS FULL DATA IN CACHE) ---
+@st.cache_data(ttl=3600)
+def load_raw_backend_data(url):
+    """Fetches full historical data from GitHub and caches it."""
     df = pd.read_csv(url, compression='zip', low_memory=False, on_bad_lines='skip')
-    
-    # 1. Clean up column names (removes any accidental hidden spaces)
     df.columns = df.columns.str.strip()
     
-    # 2. Smartly detect the date column
-    if 'Invoice Date' in df.columns:
-        date_col = 'Invoice Date'
-    elif 'Date' in df.columns:
-        date_col = 'Date'
-    else:
-        raise KeyError(f"Could not find a date column. The columns found in your GitHub file are: {', '.join(df.columns)}")
-    
-    # Ensure Date column is datetime format 
+    date_col = 'Invoice Date' if 'Invoice Date' in df.columns else 'Date'
+    if date_col not in df.columns:
+        raise KeyError(f"Could not find a date column. Columns found: {', '.join(df.columns)}")
+        
     df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
+    # Drop rows where date failed to parse
+    df = df.dropna(subset=[date_col]) 
     
-    # Filter: Only consider last 12 months from the most recent data
-    most_recent_date = df[date_col].max()
-    twelve_months_ago = most_recent_date - pd.DateOffset(months=12)
-    recent_df = df[df[date_col] >= twelve_months_ago]
+    return df, date_col
+
+def generate_filtered_database(df, date_col, start_date, end_date):
+    """Slices data by selected dates and pivots to find Quantities AND Frequencies per area."""
+    # Convert dates to pandas datetime for accurate filtering
+    mask = (df[date_col].dt.date >= start_date) & (df[date_col].dt.date <= end_date)
+    filtered_df = df[mask].copy()
     
-    # Pivot the data to get Areas as columns
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
-    
     part_col = 'PartNumber' if 'PartNumber' in df.columns else 'Part Number'
     desc_col = 'Description'
     code_col = 'Product Code' if 'Product Code' in df.columns else 'Part Code'
+    qty_col = 'qty' if 'qty' in df.columns else 'Quantity'
     
-    pivot_df = recent_df.pivot_table(
-        index=[part_col, code_col, desc_col],
-        columns='Area',
-        values='qty' if 'qty' in df.columns else 'Quantity',
-        aggfunc='sum',
-        fill_value=0
+    # 1. Pivot for QUANTITY (summing the qty column)
+    pivot_qty = filtered_df.pivot_table(
+        index=[part_col, code_col, desc_col], columns='Area', values=qty_col, aggfunc='sum', fill_value=0
     ).reset_index()
     
-    # Rename the part column back to 'PartNumber' just for consistency in the app
-    pivot_df.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
+    # 2. Pivot for FREQUENCY (counting the number of orders)
+    pivot_freq = filtered_df.pivot_table(
+        index=[part_col, code_col, desc_col], columns='Area', values=qty_col, aggfunc='count', fill_value=0
+    ).reset_index()
     
-    # --- NEW FREQUENCY CALCULATION ---
-    # Count how many times each part appears in the 12-month data (transaction count)
-    frequency_df = recent_df.groupby(part_col).size().reset_index(name='Frequency')
-    frequency_df.rename(columns={part_col: 'PartNumber'}, inplace=True)
+    # Standardize names
+    pivot_qty.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
+    pivot_freq.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
     
-    # Merge the frequency column into the main pivot table
-    pivot_df = pd.merge(pivot_df, frequency_df, on='PartNumber', how='left')
-    pivot_df['Frequency'] = pivot_df['Frequency'].fillna(0)
-    # ---------------------------------
-    
-    # Ensure all required areas exist in the columns
+    # Ensure all columns exist even if zero sales in that period
     for area in target_areas:
-        if area not in pivot_df.columns:
-            pivot_df[area] = 0
+        if area not in pivot_qty.columns: pivot_qty[area] = 0
+        if area not in pivot_freq.columns: pivot_freq[area] = 0
             
-    # Calculate Total Quantity
-    pivot_df['Total'] = pivot_df[target_areas].sum(axis=1)
+    # Calculate Totals
+    pivot_qty['Total Qty'] = pivot_qty[target_areas].sum(axis=1)
+    pivot_freq['Total Freq'] = pivot_freq[target_areas].sum(axis=1)
     
-    return pivot_df, most_recent_date, twelve_months_ago
+    # Rename frequency columns to avoid duplicate names when merging
+    freq_rename_map = {area: f"{area} Freq" for area in target_areas}
+    pivot_freq.rename(columns=freq_rename_map, inplace=True)
+    
+    # Merge both tables into one master backend database
+    merge_cols = ['PartNumber', 'Product Code', 'Description', 'Total Freq'] + list(freq_rename_map.values())
+    final_db = pd.merge(pivot_qty, pivot_freq[merge_cols], on=['PartNumber', 'Product Code', 'Description'], how='left')
+    
+    return final_db, target_areas
 
 # --- EXCEL EXPORT HELPER ---
 def convert_df_to_excel(df):
-    """Converts a dataframe to an Excel file in memory."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Sales Report')
-    processed_data = output.getvalue()
-    return processed_data
+    return output.getvalue()
+
 
 # --- SIDEBAR: SYSTEM STATUS & UPDATE ---
 with st.sidebar:
     st.header("⚙️ System Status")
-    
     try:
-        with st.spinner("Fetching data from GitHub..."):
-            database, max_date, min_date = load_and_process_backend_data(GITHUB_CSV_URL)
+        with st.spinner("Fetching full historical data from GitHub..."):
+            raw_data, date_col_name = load_raw_backend_data(GITHUB_CSV_URL)
+            db_min_date = raw_data[date_col_name].min().date()
+            db_max_date = raw_data[date_col_name].max().date()
             
         st.success("✅ Database Active & In-Memory")
-        st.info(f"📅 **Data Range:**\n\n{min_date.strftime('%d %b %Y')} to {max_date.strftime('%d %b %Y')}")
+        st.info(f"📅 **Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
         
         if st.button("🔄 Force Data Refresh"):
             st.cache_data.clear()
             st.rerun()
-            
     except Exception as e:
-        st.error(f"Failed to load data from GitHub. Please check the URL. \n\nError: {e}")
+        st.error(f"Failed to load data from GitHub.\n\nError: {e}")
         st.stop()
         
     st.divider()
     st.header("📥 Update Master Database")
     st.write("Upload your new monthly data to merge it with the base file.")
-    
     monthly_file = st.file_uploader("Upload New Month Data", type=["csv", "xlsx"])
-    
     if monthly_file:
         try:
-            if monthly_file.name.endswith('.csv'):
-                new_df = pd.read_csv(monthly_file, low_memory=False)
-            else:
-                new_df = pd.read_excel(monthly_file)
-                
+            new_df = pd.read_csv(monthly_file, low_memory=False) if monthly_file.name.endswith('.csv') else pd.read_excel(monthly_file)
             new_df.columns = new_df.columns.str.strip() 
-            
             with st.spinner("Merging with Master Database..."):
                 raw_base_df = pd.read_csv(GITHUB_CSV_URL, compression='zip', low_memory=False, on_bad_lines='skip')
                 raw_base_df.columns = raw_base_df.columns.str.strip()
-                
-                updated_master_df = pd.concat([raw_base_df, new_df], ignore_index=True)
-                updated_master_df = updated_master_df.drop_duplicates()
+                updated_master_df = pd.concat([raw_base_df, new_df], ignore_index=True).drop_duplicates()
                 
                 import zipfile
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    csv_str = updated_master_df.to_csv(index=False)
-                    zip_file.writestr("Sales.csv", csv_str) 
+                    zip_file.writestr("Sales.csv", updated_master_df.to_csv(index=False)) 
                     
-                st.success(f"✅ Merged successfully! The database grew from {len(raw_base_df)} to {len(updated_master_df)} rows.")
-                
-                st.download_button(
-                    label="📦 Download New Master File (.zip)",
-                    data=zip_buffer.getvalue(),
-                    file_name="Sales.zip",
-                    mime="application/zip",
-                    help="Download this and drag-and-drop it into your GitHub repo to update the app!"
-                )
+                st.success(f"✅ Merged! Size: {len(updated_master_df)} rows.")
+                st.download_button("📦 Download New Master File (.zip)", data=zip_buffer.getvalue(), file_name="Sales.zip", mime="application/zip")
         except Exception as e:
             st.error(f"Error merging files: {e}")
 
+
+# --- DATE FILTERING UI ---
+st.write("### 📅 Set Timeframe")
+
+# Quick select buttons
+time_preset = st.radio("Quick Filters:", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"], horizontal=True)
+
+# Determine the date range based on selection
+if time_preset == "Last 3 Months":
+    start_date = (db_max_date - pd.DateOffset(months=3)).date()
+    end_date = db_max_date
+elif time_preset == "Last 6 Months":
+    start_date = (db_max_date - pd.DateOffset(months=6)).date()
+    end_date = db_max_date
+elif time_preset == "Last 12 Months":
+    start_date = (db_max_date - pd.DateOffset(months=12)).date()
+    end_date = db_max_date
+else:
+    # Custom interactive slider
+    date_range = st.slider("Select Custom Date Range", min_value=db_min_date, max_value=db_max_date, value=(db_min_date, db_max_date), format="DD/MM/YY")
+    start_date, end_date = date_range[0], date_range[1]
+
+# Display the final active date range beautifully above the columns
+st.info(f"📊 **Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %B %Y')}** to **{end_date.strftime('%d %B %Y')}**")
+
+# Generate the specialized database for the selected dates
+database, areas = generate_filtered_database(raw_data, date_col_name, start_date, end_date)
+
+
 # --- MAIN INTERFACE: THE CHECKER ---
-st.write("### Enter Part Numbers")
-st.write("Type or paste your **Part Numbers** below to instantly pull VECV inventory metrics.")
+st.write("### 🔍 Enter Part Numbers")
 
-# 1. Initialize an editor key in session state if it doesn't exist
-if 'editor_key' not in st.session_state:
-    st.session_state['editor_key'] = 0
+if 'editor_key' not in st.session_state: st.session_state['editor_key'] = 0
+if 'input_df' not in st.session_state: st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
 
-if 'input_df' not in st.session_state:
-    st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
-
-# --- CLEAR BUTTON LOGIC ---
 if st.button("🗑️ Clear List"):
-    # Reset the initial dataframe
     st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
-    # 2. Change the key so Streamlit builds a brand new, empty widget
     st.session_state['editor_key'] += 1
     st.rerun()
 
-# 3. Use the dynamic key here
 edited_input = st.data_editor(
     st.session_state['input_df'],
     num_rows="dynamic",
-    column_config={
-        "PartNumber": st.column_config.TextColumn("Part Number (Editable)", required=True)
-    },
+    column_config={"PartNumber": st.column_config.TextColumn("Part Number (Editable)", required=True)},
     key=f"data_editor_{st.session_state['editor_key']}" 
 )
 
 if not edited_input.empty:
     valid_inputs = edited_input[edited_input["PartNumber"].astype(str).str.strip() != ""]
-    
     if not valid_inputs.empty:
         valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str)
         database['PartNumber'] = database['PartNumber'].astype(str)
         
-        result_df = pd.merge(
-            valid_inputs, 
-            database, 
-            on="PartNumber", 
-            how="left"
-        )
+        # Merge input with dynamic DB
+        result_df = pd.merge(valid_inputs, database, on="PartNumber", how="left")
         
         result_df['Description'] = result_df['Description'].fillna("Not Found")
         result_df['Product Code'] = result_df['Product Code'].fillna("N/A")
         
-        # Numeric columns cleanup
-        numeric_cols = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore", "Total", "Frequency"]
-        for col in numeric_cols:
+        # Cleanup numerical values
+        all_numeric_cols = areas + [f"{a} Freq" for a in areas] + ['Total Qty', 'Total Freq']
+        for col in all_numeric_cols:
             if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+                result_df[col] = result_df[col].fillna(0).astype(int)
         
-        # Display columns
-        display_cols = ['PartNumber', 'Product Code', 'Description', 'Hoskote', 'Kothagudem', 'Ramagundam', 'Neyveli', 'Nellore', 'Total', 'Frequency']
-        display_cols = [c for c in display_cols if c in result_df.columns]
-        result_df = result_df[display_cols]
+        # Construct logical display order (Qty and Freq side-by-side for each area)
+        display_cols = ['PartNumber', 'Product Code', 'Description']
+        for area in areas:
+            display_cols.extend([area, f"{area} Freq"])
+        display_cols.extend(['Total Qty', 'Total Freq'])
         
-        st.write("### 📊 Sales Report")
-        st.dataframe(
-            result_df,
-            use_container_width=True,
-            column_config={
-                "PartNumber": st.column_config.TextColumn("Part Number"),
-                "Product Code": st.column_config.TextColumn("Product Code"),
-                "Description": st.column_config.TextColumn("Description"),
-                "Total": st.column_config.NumberColumn("Total Qty", format="%d"),
-                "Frequency": st.column_config.NumberColumn("Order Frequency", format="%d")
-            }
-        )
+        # Filter down to available columns
+        result_df = result_df[[c for c in display_cols if c in result_df.columns]]
         
-        # --- EXCEL DOWNLOAD BUTTON ---
-        excel_data = convert_df_to_excel(result_df)
+        st.write("### 📋 Final Sales Report")
+        st.dataframe(result_df, use_container_width=True)
         
+        # EXCEL DOWNLOAD
         st.download_button(
-            label="📥 Download Report (Excel)",
-            data=excel_data,
-            file_name=f"VECV_sales_report_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            label="📥 Download Full Report (Excel)",
+            data=convert_df_to_excel(result_df),
+            file_name=f"VECV_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
