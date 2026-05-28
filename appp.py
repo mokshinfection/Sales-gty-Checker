@@ -14,7 +14,7 @@ GITHUB_CSV_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Che
 # ... inside your load_and_process_backend_data function ...
 
     # 2. Tell Pandas to unzip the file automatically
-df = pd.read_csv(url, compression='zip', low_memory=False, on_bad_lines='skip')
+df = pd.read_csv("https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip", compression='zip', low_memory=False, on_bad_lines='skip')
 # --- DATA PROCESSING ---
 @st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
 # --- DATA PROCESSING ---
