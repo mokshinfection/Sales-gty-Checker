@@ -8,8 +8,7 @@ st.set_page_config(page_title="Sales Quantity Checker", layout="wide")
 st.title("📦 Sales Quantity Checker")
 
 # 🔴 REPLACE THIS WITH YOUR ACTUAL GITHUB RAW URL 🔴
-GITHUB_CSV_URL = "https://github.com/mokshinfection/Sales-gty-Checker/blob/main/Sales.csv"
-
+GITHUB_CSV_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.csv"
 # --- DATA PROCESSING ---
 @st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
 def load_and_process_backend_data(url):
