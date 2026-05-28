@@ -117,6 +117,8 @@ with st.sidebar:
 
 
 # --- DATE FILTERING UI ---
+
+# --- DATE FILTERING UI ---
 st.write("### Set Timeframe")
 
 time_preset = st.radio("Quick Filters:", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"], horizontal=True)
@@ -134,7 +136,7 @@ else:
     date_range = st.slider("Select Custom Date Range", min_value=db_min_date, max_value=db_max_date, value=(db_min_date, db_max_date), format="DD/MM/YY")
     start_date, end_date = date_range[0], date_range[1]
 
-st.info(f"**Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %B %Y')}** to **{end_date.strftime('%d %B %Y')}**")
+# (The blue banner was removed from here)
 
 database, areas = generate_filtered_database(raw_data, date_col_name, start_date, end_date)
 
@@ -174,6 +176,9 @@ if not edited_input.empty:
                 result_df[col] = result_df[col].fillna(0).astype(int)
         
         st.write("### Final Sales Report")
+        
+        # --- THE BLUE BANNER IS NOW HERE ---
+        st.info(f"**Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %B %Y')}** to **{end_date.strftime('%d %B %Y')}**")
         
         view_mode = st.radio(
             "Select Display Format:", 
@@ -227,3 +232,4 @@ if not edited_input.empty:
             file_name=f"VECV_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
