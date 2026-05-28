@@ -11,35 +11,61 @@ st.title("📦 Sales Quantity Checker")
 GITHUB_CSV_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.csv"
 # --- DATA PROCESSING ---
 @st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
+# --- DATA PROCESSING ---
+@st.cache_data(ttl=3600) # Keeps data in memory for 1 hour before checking GitHub again
 def load_and_process_backend_data(url):
     """Fetches data from GitHub, filters for last 12 months, and pivots."""
-    # Load directly from GitHub
-    df = pd.read_csv(url, low_memory=False)
+    # Load directly from GitHub and skip bad rows
+    df = pd.read_csv(url, low_memory=False, on_bad_lines='skip')
+    
+    # 1. Clean up column names (removes any accidental hidden spaces)
+    df.columns = df.columns.str.strip()
+    
+    # 2. Smartly detect the date column
+    if 'Invoice Date' in df.columns:
+        date_col = 'Invoice Date'
+    elif 'Date' in df.columns:
+        date_col = 'Date'
+    else:
+        # If it still fails, this will print out the exact columns it found to help you debug!
+        raise KeyError(f"Could not find a date column. The columns found in your GitHub file are: {', '.join(df.columns)}")
     
     # Ensure Date column is datetime format 
-    df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], dayfirst=True, errors='coerce')
+    df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
     
     # Filter: Only consider last 12 months from the most recent data
-    most_recent_date = df['Invoice Date'].max()
+    most_recent_date = df[date_col].max()
     twelve_months_ago = most_recent_date - pd.DateOffset(months=12)
-    recent_df = df[df['Invoice Date'] >= twelve_months_ago]
+    recent_df = df[df[date_col] >= twelve_months_ago]
     
     # Pivot the data to get Areas as columns
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
+    # Make sure we use the correct Part Number column name (checking for spaces)
+    part_col = 'PartNumber' if 'PartNumber' in df.columns else 'Part Number'
+    desc_col = 'Description'
+    code_col = 'Product Code' if 'Product Code' in df.columns else 'Part Code'
+    
     pivot_df = recent_df.pivot_table(
-        index=['PartNumber', 'Product Code', 'Description'],
+        index=[part_col, code_col, desc_col],
         columns='Area',
-        values='qty',
+        values='qty' if 'qty' in df.columns else 'Quantity',
         aggfunc='sum',
         fill_value=0
     ).reset_index()
+    
+    # Rename the part column back to 'PartNumber' just for consistency in the app
+    pivot_df.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
     
     # Ensure all required areas exist in the columns
     for area in target_areas:
         if area not in pivot_df.columns:
             pivot_df[area] = 0
             
+    # Calculate Total
+    pivot_df['Total'] = pivot_df[target_areas].sum(axis=1)
+    
+    return pivot_df, most_recent_date, twelve_months_ago
     # Calculate Total
     pivot_df['Total'] = pivot_df[target_areas].sum(axis=1)
     
