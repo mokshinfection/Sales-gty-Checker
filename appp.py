@@ -157,63 +157,8 @@ st.write("### 🔍 Enter Part Numbers")
 if 'editor_key' not in st.session_state: st.session_state['editor_key'] = 0
 if 'input_df' not in st.session_state: st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
 
-if st.button("🗑️ Clear List"):
-    st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
-    st.session_state['editor_key'] += 1
-    st.rerun()
-
-edited_input = st.data_editor(
-    st.session_state['input_df'],
-    num_rows="dynamic",
-    column_config={"PartNumber": st.column_config.TextColumn("Part Number (Editable)", required=True)},
-    key=f"data_editor_{st.session_state['editor_key']}" 
-)
-
-if not edited_input.empty:
-    valid_inputs = edited_input[edited_input["PartNumber"].astype(str).str.strip() != ""]
-    if not valid_inputs.empty:
-        valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str)
-        database['PartNumber'] = database['PartNumber'].astype(str)
-        
-        # Merge input with dynamic DB
-        result_df = pd.merge(valid_inputs, database, on="PartNumber", how="left")
-        
-        result_df['Description'] = result_df['Description'].fillna("Not Found")
-        result_df['Product Code'] = result_df['Product Code'].fillna("N/A")
-        
-        # Cleanup numerical values
-        all_numeric_cols = areas + [f"{a} Freq" for a in areas] + ['Total Qty', 'Total Freq']
-        for col in all_numeric_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0).astype(int)
-        
-        # Construct logical display order (Qty and Freq side-by-side for each area)
-        display_cols = ['PartNumber', 'Product Code', 'Description']
-        for area in areas:
-            display_cols.extend([area, f"{area} Freq"])
-        display_cols.extend(['Total Qty', 'Total Freq'])
-        
-        # Filter down to available columns
-        result_df = result_df[[c for c in display_cols if c in result_df.columns]]
-        
-        st.write("### 📋 Final Sales Report")
-        st.dataframe(result_df, use_container_width=True)
-        
-        # EXCEL DOWNLOAD
-        st.download_button(
-            label="📥 Download Full Report (Excel)",
-            data=convert_df_to_excel(result_df),
-            file_name=f"VECV_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-# --- MAIN INTERFACE: THE CHECKER ---
-st.write("### 🔍 Enter Part Numbers")
-
-if 'editor_key' not in st.session_state: st.session_state['editor_key'] = 0
-if 'input_df' not in st.session_state: st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
-
-if st.button("🗑️ Clear List"):
+# Added a unique 'key' to this button so it can never conflict with anything else
+if st.button("🗑️ Clear List", key="clear_list_btn"):
     st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
     st.session_state['editor_key'] += 1
     st.rerun()
