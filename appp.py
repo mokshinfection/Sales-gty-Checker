@@ -26,7 +26,6 @@ def load_and_process_backend_data(url):
     elif 'Date' in df.columns:
         date_col = 'Date'
     else:
-        # If it still fails, this will print out the exact columns it found to help you debug!
         raise KeyError(f"Could not find a date column. The columns found in your GitHub file are: {', '.join(df.columns)}")
     
     # Ensure Date column is datetime format 
@@ -40,7 +39,6 @@ def load_and_process_backend_data(url):
     # Pivot the data to get Areas as columns
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
-    # Make sure we use the correct Part Number column name (checking for spaces)
     part_col = 'PartNumber' if 'PartNumber' in df.columns else 'Part Number'
     desc_col = 'Description'
     code_col = 'Product Code' if 'Product Code' in df.columns else 'Part Code'
@@ -56,12 +54,22 @@ def load_and_process_backend_data(url):
     # Rename the part column back to 'PartNumber' just for consistency in the app
     pivot_df.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
     
+    # --- NEW FREQUENCY CALCULATION ---
+    # Count how many times each part appears in the 12-month data (transaction count)
+    frequency_df = recent_df.groupby(part_col).size().reset_index(name='Frequency')
+    frequency_df.rename(columns={part_col: 'PartNumber'}, inplace=True)
+    
+    # Merge the frequency column into the main pivot table
+    pivot_df = pd.merge(pivot_df, frequency_df, on='PartNumber', how='left')
+    pivot_df['Frequency'] = pivot_df['Frequency'].fillna(0)
+    # ---------------------------------
+    
     # Ensure all required areas exist in the columns
     for area in target_areas:
         if area not in pivot_df.columns:
             pivot_df[area] = 0
             
-    # Calculate Total
+    # Calculate Total Quantity
     pivot_df['Total'] = pivot_df[target_areas].sum(axis=1)
     
     return pivot_df, most_recent_date, twelve_months_ago
@@ -86,7 +94,6 @@ with st.sidebar:
         st.success("✅ Database Active & In-Memory")
         st.info(f"📅 **Data Range:**\n\n{min_date.strftime('%d %b %Y')} to {max_date.strftime('%d %b %Y')}")
         
-        # Button to manually clear the cache if the GitHub file was just updated
         if st.button("🔄 Force Data Refresh"):
             st.cache_data.clear()
             st.rerun()
@@ -103,36 +110,28 @@ with st.sidebar:
     
     if monthly_file:
         try:
-            # 1. Load the newly uploaded monthly data
             if monthly_file.name.endswith('.csv'):
                 new_df = pd.read_csv(monthly_file, low_memory=False)
             else:
                 new_df = pd.read_excel(monthly_file)
                 
-            new_df.columns = new_df.columns.str.strip() # Clean column names
+            new_df.columns = new_df.columns.str.strip() 
             
             with st.spinner("Merging with Master Database..."):
-                # 2. Fetch the raw base data currently on GitHub
                 raw_base_df = pd.read_csv(GITHUB_CSV_URL, compression='zip', low_memory=False, on_bad_lines='skip')
                 raw_base_df.columns = raw_base_df.columns.str.strip()
                 
-                # 3. Append the new data to the bottom of the base data
                 updated_master_df = pd.concat([raw_base_df, new_df], ignore_index=True)
-                
-                # 4. Drop duplicates (prevents double-counting if you accidentally upload the same month twice)
                 updated_master_df = updated_master_df.drop_duplicates()
                 
-                # 5. Compress the merged data back into a ZIP file in memory
                 import zipfile
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                     csv_str = updated_master_df.to_csv(index=False)
-                    # Name the file inside the zip exactly what it was before
                     zip_file.writestr("Sales.csv", csv_str) 
                     
                 st.success(f"✅ Merged successfully! The database grew from {len(raw_base_df)} to {len(updated_master_df)} rows.")
                 
-                # 6. Provide the download button
                 st.download_button(
                     label="📦 Download New Master File (.zip)",
                     data=zip_buffer.getvalue(),
@@ -176,12 +175,14 @@ if not edited_input.empty:
         result_df['Description'] = result_df['Description'].fillna("Not Found")
         result_df['Product Code'] = result_df['Product Code'].fillna("N/A")
         
-        numeric_cols = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore", "Total"]
+        # Added Frequency to the numeric columns cleanup
+        numeric_cols = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore", "Total", "Frequency"]
         for col in numeric_cols:
             if col in result_df.columns:
                 result_df[col] = result_df[col].fillna(0)
         
-        display_cols = ['PartNumber', 'Product Code', 'Description', 'Hoskote', 'Kothagudem', 'Ramagundam', 'Neyveli', 'Nellore', 'Total']
+        # Added Frequency to the display columns
+        display_cols = ['PartNumber', 'Product Code', 'Description', 'Hoskote', 'Kothagudem', 'Ramagundam', 'Neyveli', 'Nellore', 'Total', 'Frequency']
         display_cols = [c for c in display_cols if c in result_df.columns]
         result_df = result_df[display_cols]
         
@@ -193,7 +194,8 @@ if not edited_input.empty:
                 "PartNumber": st.column_config.TextColumn("Part Number"),
                 "Product Code": st.column_config.TextColumn("Product Code"),
                 "Description": st.column_config.TextColumn("Description"),
-                "Total": st.column_config.NumberColumn("Total Sales", format="%d")
+                "Total": st.column_config.NumberColumn("Total Qty", format="%d"),
+                "Frequency": st.column_config.NumberColumn("Order Frequency", format="%d") # Formats it as a clean integer
             }
         )
         
