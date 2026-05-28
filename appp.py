@@ -105,7 +105,53 @@ with st.sidebar:
     except Exception as e:
         st.error(f"Failed to load data from GitHub. Please check the URL. \n\nError: {e}")
         st.stop()
-
+st.divider()
+    st.header("📥 Update Master Database")
+    st.write("Upload your new monthly data to merge it with the base file.")
+    
+    monthly_file = st.file_uploader("Upload New Month Data", type=["csv", "xlsx"])
+    
+    if monthly_file:
+        try:
+            # 1. Load the newly uploaded monthly data
+            if monthly_file.name.endswith('.csv'):
+                new_df = pd.read_csv(monthly_file, low_memory=False)
+            else:
+                new_df = pd.read_excel(monthly_file)
+                
+            new_df.columns = new_df.columns.str.strip() # Clean column names
+            
+            with st.spinner("Merging with Master Database..."):
+                # 2. Fetch the raw base data currently on GitHub
+                raw_base_df = pd.read_csv(GITHUB_CSV_URL, compression='zip', low_memory=False, on_bad_lines='skip')
+                raw_base_df.columns = raw_base_df.columns.str.strip()
+                
+                # 3. Append the new data to the bottom of the base data
+                updated_master_df = pd.concat([raw_base_df, new_df], ignore_index=True)
+                
+                # 4. Drop duplicates (prevents double-counting if you accidentally upload the same month twice)
+                updated_master_df = updated_master_df.drop_duplicates()
+                
+                # 5. Compress the merged data back into a ZIP file in memory
+                import zipfile
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                    csv_str = updated_master_df.to_csv(index=False)
+                    # Name the file inside the zip exactly what it was before
+                    zip_file.writestr("Sales.csv", csv_str) 
+                    
+                st.success(f"✅ Merged successfully! The database grew from {len(raw_base_df)} to {len(updated_master_df)} rows.")
+                
+                # 6. Provide the download button
+                st.download_button(
+                    label="📦 Download New Master File (.zip)",
+                    data=zip_buffer.getvalue(),
+                    file_name="Sales.zip",
+                    mime="application/zip",
+                    help="Download this and drag-and-drop it into your GitHub repo to update the app!"
+                )
+        except Exception as e:
+            st.error(f"Error merging files: {e}")
 # --- MAIN INTERFACE: THE CHECKER ---
 st.write("### Enter Part Numbers")
 st.write("Type or paste your **Part Numbers** below to instantly pull VECV inventory metrics.")
