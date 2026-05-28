@@ -206,3 +206,102 @@ if not edited_input.empty:
             file_name=f"VECV_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+        
+# --- MAIN INTERFACE: THE CHECKER ---
+st.write("### 🔍 Enter Part Numbers")
+
+if 'editor_key' not in st.session_state: st.session_state['editor_key'] = 0
+if 'input_df' not in st.session_state: st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
+
+if st.button("🗑️ Clear List"):
+    st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
+    st.session_state['editor_key'] += 1
+    st.rerun()
+
+edited_input = st.data_editor(
+    st.session_state['input_df'],
+    num_rows="dynamic",
+    column_config={"PartNumber": st.column_config.TextColumn("Part Number (Editable)", required=True)},
+    key=f"data_editor_{st.session_state['editor_key']}" 
+)
+
+if not edited_input.empty:
+    valid_inputs = edited_input[edited_input["PartNumber"].astype(str).str.strip() != ""]
+    if not valid_inputs.empty:
+        valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str)
+        database['PartNumber'] = database['PartNumber'].astype(str)
+        
+        # Merge input with dynamic DB
+        result_df = pd.merge(valid_inputs, database, on="PartNumber", how="left")
+        
+        result_df['Description'] = result_df['Description'].fillna("Not Found")
+        result_df['Product Code'] = result_df['Product Code'].fillna("N/A")
+        
+        # Cleanup numerical values
+        all_numeric_cols = areas + [f"{a} Freq" for a in areas] + ['Total Qty', 'Total Freq']
+        for col in all_numeric_cols:
+            if col in result_df.columns:
+                result_df[col] = result_df[col].fillna(0).astype(int)
+        
+        st.write("### 📋 Final Sales Report")
+        
+        # --- NEW DISPLAY TOGGLE ---
+        view_mode = st.radio(
+            "Select Display Format:", 
+            ["✨ Compact View (Combined)", "📊 Detailed View (Split Columns)"], 
+            horizontal=True
+        )
+        
+        if view_mode == "✨ Compact View (Combined)":
+            # Combine Qty and Freq into a single clean string to prevent scrolling
+            display_df = result_df[['PartNumber', 'Product Code', 'Description']].copy()
+            
+            for area in areas:
+                display_df[area] = result_df[area].astype(str) + " 📦 (" + result_df[f"{area} Freq"].astype(str) + "x)"
+                
+            display_df['Total'] = result_df['Total Qty'].astype(str) + " 📦 (" + result_df['Total Freq'].astype(str) + "x)"
+            
+            st.dataframe(
+                display_df, 
+                use_container_width=True,
+                column_config={
+                    "PartNumber": st.column_config.TextColumn("Part Number"),
+                    "Total": st.column_config.TextColumn("Total (Qty & Freq)")
+                }
+            )
+            
+        else:
+            # Construct logical display order (Qty and Freq side-by-side)
+            display_cols = ['PartNumber', 'Product Code', 'Description']
+            col_formatting = {
+                "PartNumber": st.column_config.TextColumn("Part Number"),
+                "Product Code": st.column_config.TextColumn("Product Code"),
+                "Total Qty": st.column_config.NumberColumn("Total Qty", format="%d 📦"),
+                "Total Freq": st.column_config.NumberColumn("Total Freq", format="%d 🔄")
+            }
+            
+            for area in areas:
+                display_cols.extend([area, f"{area} Freq"])
+                col_formatting[area] = st.column_config.NumberColumn(area, format="%d 📦")
+                col_formatting[f"{area} Freq"] = st.column_config.NumberColumn(f"{area} Freq", format="%d 🔄")
+                
+            display_cols.extend(['Total Qty', 'Total Freq'])
+            
+            # Filter down to available columns
+            detailed_df = result_df[[c for c in display_cols if c in result_df.columns]]
+            st.dataframe(detailed_df, use_container_width=True, column_config=col_formatting)
+        
+        # --- EXCEL DOWNLOAD (Always uses the clean, raw numbers) ---
+        # Prepare the raw data for Excel (stripping out the UI emojis/formatting)
+        export_cols = ['PartNumber', 'Product Code', 'Description']
+        for area in areas:
+            export_cols.extend([area, f"{area} Freq"])
+        export_cols.extend(['Total Qty', 'Total Freq'])
+        export_df = result_df[[c for c in export_cols if c in result_df.columns]]
+        
+        st.download_button(
+            label="📥 Download Full Report (Excel)",
+            data=convert_df_to_excel(export_df),
+            file_name=f"VECV_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
