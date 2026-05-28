@@ -146,6 +146,15 @@ with st.sidebar:
 st.write("### Enter Part Numbers")
 st.write("Type or paste your **Part Numbers** below to instantly pull VECV inventory metrics.")
 
+# --- CLEAR BUTTON LOGIC ---
+if st.button("🗑️ Clear List"):
+    # Reset the initial dataframe
+    st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
+    # Delete the widget's internal memory state so it actually refreshes
+    if 'data_editor' in st.session_state:
+        del st.session_state['data_editor']
+    st.rerun()
+
 if 'input_df' not in st.session_state:
     st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""]})
 
@@ -175,13 +184,13 @@ if not edited_input.empty:
         result_df['Description'] = result_df['Description'].fillna("Not Found")
         result_df['Product Code'] = result_df['Product Code'].fillna("N/A")
         
-        # Added Frequency to the numeric columns cleanup
+        # Numeric columns cleanup
         numeric_cols = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore", "Total", "Frequency"]
         for col in numeric_cols:
             if col in result_df.columns:
                 result_df[col] = result_df[col].fillna(0)
         
-        # Added Frequency to the display columns
+        # Display columns
         display_cols = ['PartNumber', 'Product Code', 'Description', 'Hoskote', 'Kothagudem', 'Ramagundam', 'Neyveli', 'Nellore', 'Total', 'Frequency']
         display_cols = [c for c in display_cols if c in result_df.columns]
         result_df = result_df[display_cols]
@@ -195,7 +204,7 @@ if not edited_input.empty:
                 "Product Code": st.column_config.TextColumn("Product Code"),
                 "Description": st.column_config.TextColumn("Description"),
                 "Total": st.column_config.NumberColumn("Total Qty", format="%d"),
-                "Frequency": st.column_config.NumberColumn("Order Frequency", format="%d") # Formats it as a clean integer
+                "Frequency": st.column_config.NumberColumn("Order Frequency", format="%d")
             }
         )
         
