@@ -76,7 +76,6 @@ def get_db_metadata():
     columns = [col[1] for col in cursor.fetchall()]
     date_col = 'Invoice Date' if 'Invoice Date' in columns else 'Date'
     
-    # 💡 FIXED: Filter out NULL values, spaces, and empty strings from the date column calculation
     query = f"""
         SELECT MIN([{date_col}]), MAX([{date_col}]) 
         FROM [{table_name}] 
@@ -88,9 +87,12 @@ def get_db_metadata():
     min_d, max_d = cursor.fetchone()
     conn.close()
     
-    # Fallback to current date if the table contains completely un-parseable dates
-    parsed_min = pd.to_datetime(min_d) if min_d else pd.Timestamp.now() - pd.DateOffset(years=1)
-    parsed_max = pd.to_datetime(max_d) if max_d else pd.Timestamp.now()
+    # 💡 FIXED: Explicitly force cast to pandas datetime using specific formatting rules
+    parsed_min = pd.to_datetime(min_d, errors='coerce') if min_d else pd.Timestamp.now() - pd.DateOffset(years=1)
+    parsed_max = pd.to_datetime(max_d, errors='coerce') if max_d else pd.Timestamp.now()
+    
+    if pd.isnull(parsed_min): parsed_min = pd.Timestamp.now() - pd.DateOffset(years=1)
+    if pd.isnull(parsed_max): parsed_max = pd.Timestamp.now()
     
     return table_name, date_col, parsed_min, parsed_max
 
