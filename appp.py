@@ -38,7 +38,8 @@ def extract_master_db():
         conn = sqlite3.connect(DB_FILE_PATH)
         cursor = conn.cursor()
         
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        # FIX: Skip blank tables and system tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND TRIM(name) != '';")
         tables = cursor.fetchall()
         table_name = tables[0][0] if tables else "sales_records"
         
@@ -46,7 +47,7 @@ def extract_master_db():
         columns = [col[1] for col in cursor.fetchall()]
         
         part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
-        date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
+        date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'invoice_date', 'date', 'posting date']), columns[0])
         
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
@@ -83,14 +84,15 @@ def safe_parse_mixed_dates(series):
 def get_db_metadata():
     conn = sqlite3.connect(DB_FILE_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    # FIX: Exclude blank table names 
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND TRIM(name) != '';")
     tables = cursor.fetchall()
     table_name = tables[0][0] if tables else "sales_records"
     
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
+    date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'invoice_date', 'date', 'posting date']), columns[0])
     
     parsed_min = None
     parsed_max = None
@@ -150,12 +152,12 @@ else:
 
 # --- 💡 DEEP FUZZY COLUMN MATCHER ---
 def normalize_columns(df, actual_part_col, actual_date_col):
-    exact_qty = ['qty', 'quantity', 'billed qty', 'invoice qty', 'invoiced qty', 'issue qty', 'sold qty', 'total qty']
-    exact_code = ['productcode', 'product code', 'part code', 'item code', 'material code', 'group', 'product group', 'item group', 'category', 'hsn code', 'family', 'hsn']
-    # 💡 FIX: Removed 'name' to prevent conflict with Customer_Name
-    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc', 'part desc', 'nomenclature']
-    exact_area = ['area', 'branch', 'location', 'plant', 'site', 'warehouse', 'region', 'city']
-    exact_rate = ['rate', 'unit cost', 'unit_cost', 'price', 'unit price', 'basic price', 'mrp', 'cost', 'item price', 'net price', 'value', 'basic rate', 'amount']
+    # Updated to strictly target the new SQL Schema
+    exact_qty = ['qty', 'quantity', 'billed qty', 'invoice qty']
+    exact_code = ['product_code', 'productcode', 'product code', 'part code', 'item code', 'material code']
+    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc']
+    exact_area = ['area', 'branch', 'location', 'region', 'city']
+    exact_rate = ['cost', 'net_sale', 'gross_sale', 'rate', 'unit cost', 'price', 'basic price', 'amount']
 
     mapped_targets = set()
     col_map = {}
@@ -185,8 +187,6 @@ def normalize_columns(df, actual_part_col, actual_date_col):
             mapped_targets.add('rate')
 
     df.rename(columns=col_map, inplace=True)
-    
-    # 💡 BULLETPROOF SAFETY NET: Instantly drop any duplicated column names
     df = df.loc[:, ~df.columns.duplicated()].copy()
     
     current_mapped = list(col_map.values())
@@ -196,10 +196,10 @@ def normalize_columns(df, actual_part_col, actual_date_col):
         l_col = col.lower().strip()
         
         if 'qty' not in current_mapped and 'qty' not in fuzzy_map.values() and ('qty' in l_col or 'quant' in l_col): fuzzy_map[col] = 'qty'
-        elif 'Productcode' not in current_mapped and 'Productcode' not in fuzzy_map.values() and ('code' in l_col or 'group' in l_col or 'cat' in l_col): fuzzy_map[col] = 'Productcode'
+        elif 'Productcode' not in current_mapped and 'Productcode' not in fuzzy_map.values() and ('code' in l_col or 'group' in l_col): fuzzy_map[col] = 'Productcode'
         elif 'description' not in current_mapped and 'description' not in fuzzy_map.values() and ('desc' in l_col): fuzzy_map[col] = 'description'
         elif 'area' not in current_mapped and 'area' not in fuzzy_map.values() and ('branch' in l_col or 'loc' in l_col or 'plant' in l_col): fuzzy_map[col] = 'area'
-        elif 'rate' not in current_mapped and 'rate' not in fuzzy_map.values() and ('price' in l_col or 'cost' in l_col or 'rate' in l_col): fuzzy_map[col] = 'rate'
+        elif 'rate' not in current_mapped and 'rate' not in fuzzy_map.values() and ('price' in l_col or 'cost' in l_col or 'rate' in l_col or 'sale' in l_col): fuzzy_map[col] = 'rate'
             
     df.rename(columns=fuzzy_map, inplace=True)
     df = df.loc[:, ~df.columns.duplicated()].copy()
@@ -224,7 +224,7 @@ def query_targeted_data(part_numbers):
     columns = [col[1] for col in cursor.fetchall()]
     
     actual_part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
-    actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
+    actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'invoice_date', 'date', 'posting date']), columns[0])
     
     params = []
     for p in part_numbers:
@@ -255,9 +255,12 @@ def generate_filtered_database(df, start_date, end_date):
     part_col, qty_col, code_col, desc_col = 'PartNumber', 'qty', 'Productcode', 'description'
     rate_col = 'rate'
     area_col = 'area'
+    
+    # Format the areas to cleanly align with the requested targets
+    df[area_col] = df[area_col].astype(str).str.strip().str.title()
+    df[area_col] = df[area_col].replace({'Nelore': 'Nellore'})
 
     master_info = df.copy()
-    # Safely compute length without crashing
     master_info['desc_len'] = master_info[desc_col].astype(str).str.len()
     master_info = master_info.sort_values(by=[part_col, 'desc_len']).drop_duplicates(subset=[part_col], keep='last')
     master_info = master_info[[part_col, code_col, desc_col]].copy()
@@ -275,7 +278,12 @@ def generate_filtered_database(df, start_date, end_date):
     qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
     qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
-    unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost')
+    # 🟢 FIX: Unit Cost -> Total Cost / Total Quantity
+    cost_agg = df.groupby(part_col).agg({rate_col: 'sum', qty_col: 'sum'}).reset_index()
+    cost_agg['Unit Cost'] = cost_agg.apply(
+        lambda x: (x[rate_col] / x[qty_col]) if x[qty_col] != 0 else 0.0, axis=1
+    )
+    unit_costs = cost_agg[[part_col, 'Unit Cost']]
 
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
