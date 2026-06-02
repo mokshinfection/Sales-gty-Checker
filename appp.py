@@ -68,15 +68,17 @@ def safe_parse_mixed_dates(series):
     """Processes clean string dates and raw numerical Excel serial numbers at the same time."""
     str_series = series.astype(str).str.strip()
     is_numeric = str_series.str.match(r'^\d+(\.\d+)?$')
-    parsed_datetimes = pd.Series(pd.NaT, index=series.index)
+    
+    # 💡 GUARANTEED DTYPE: Ensure the entire column is forced into a native Pandas datetime format to prevent comparison errors
+    parsed_datetimes = pd.Series(pd.NaT, index=series.index, dtype='datetime64[ns]')
     
     if is_numeric.any():
         numeric_vals = pd.to_numeric(str_series[is_numeric], errors='coerce')
-        parsed_datetimes[is_numeric] = pd.to_datetime(numeric_vals, origin='1899-12-30', unit='D')
+        parsed_datetimes.loc[is_numeric] = pd.to_datetime(numeric_vals, origin='1899-12-30', unit='D')
         
-    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series != 'nan')
+    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series != 'nan') & str_series.notna()
     if non_numeric_mask.any():
-        parsed_datetimes[non_numeric_mask] = pd.to_datetime(str_series[non_numeric_mask], dayfirst=True, errors='coerce')
+        parsed_datetimes.loc[non_numeric_mask] = pd.to_datetime(str_series[non_numeric_mask], dayfirst=True, errors='coerce')
         
     return parsed_datetimes
 
@@ -194,8 +196,6 @@ def query_targeted_data(part_numbers):
                 rename_map[col] = 'rate'
                 
         df.rename(columns=rename_map, inplace=True)
-        
-        # 💡 GUARANTEED CONVERSION: Structural execution completely rules out invalid string types
         df['InvoiceDate'] = safe_parse_mixed_dates(df['InvoiceDate'])
             
     return df
@@ -203,7 +203,6 @@ def query_targeted_data(part_numbers):
 
 def generate_filtered_database(df, start_date, end_date):
     """Processes trends and layouts ONLY for the targeted matches."""
-    # Ensure our structural date index exists cleanly in the workspace
     if df.empty or 'InvoiceDate' not in df.columns:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
@@ -213,14 +212,15 @@ def generate_filtered_database(df, start_date, end_date):
     desc_col = 'description' if 'description' in df.columns else 'description'
 
     max_db_date = df['InvoiceDate'].max()
-    if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
+    if pd.isnull(max_db_date): 
+        max_db_date = pd.Timestamp(end_date)
         
-    three_months_ago = (max_db_date - pd.DateOffset(months=3)).date()
-    twelve_months_ago = (max_db_date - pd.DateOffset(months=12)).date()
-    max_date_conv = max_db_date.date()
+    three_months_ago = max_db_date - pd.DateOffset(months=3)
+    twelve_months_ago = max_db_date - pd.DateOffset(months=12)
 
-    mask_3m = (df['InvoiceDate'].dt.date >= three_months_ago) & (df['InvoiceDate'].dt.date <= max_date_conv)
-    mask_12m = (df['InvoiceDate'].dt.date >= twelve_months_ago) & (df['InvoiceDate'].dt.date <= max_date_conv)
+    # 💡 FIX: Compare natively using pandas Timestamps (Bypasses the NaT TypeError entirely)
+    mask_3m = (df['InvoiceDate'] >= three_months_ago) & (df['InvoiceDate'] <= max_db_date)
+    mask_12m = (df['InvoiceDate'] >= twelve_months_ago) & (df['InvoiceDate'] <= max_db_date)
     
     qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
     qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
@@ -228,7 +228,12 @@ def generate_filtered_database(df, start_date, end_date):
     rate_col = 'rate' if 'rate' in df.columns else None
     unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=[part_col, 'Unit Cost'])
 
-    mask = (df['InvoiceDate'].dt.date >= start_date) & (df['InvoiceDate'].dt.date <= end_date)
+    # Standardize the slider boundaries into timestamps covering the full day period
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+    # Apply the same native Timestamp comparison constraint for the main table body
+    mask = (df['InvoiceDate'] >= start_ts) & (df['InvoiceDate'] <= end_ts)
     filtered_df = df[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
