@@ -69,7 +69,6 @@ def safe_parse_mixed_dates(series):
     str_series = series.astype(str).str.strip()
     is_numeric = str_series.str.match(r'^\d+(\.\d+)?$')
     
-    # 💡 GUARANTEED DTYPE: Ensure the entire column is forced into a native Pandas datetime format to prevent comparison errors
     parsed_datetimes = pd.Series(pd.NaT, index=series.index, dtype='datetime64[ns]')
     
     if is_numeric.any():
@@ -82,9 +81,8 @@ def safe_parse_mixed_dates(series):
         
     return parsed_datetimes
 
-# --- ⚡ INSTANT METADATA FETCH (COMPLETELY DYNAMIC) ---
+# --- ⚡ INSTANT METADATA FETCH ---
 def get_db_metadata():
-    """Fetches unique database strings and uses our parser to resolve true min/max constraints."""
     conn = sqlite3.connect(DB_FILE_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -114,10 +112,8 @@ def get_db_metadata():
             
     conn.close()
     
-    if parsed_min is None or pd.isnull(parsed_min): 
-        parsed_min = pd.Timestamp("2025-04-01")
-    if parsed_max is None or pd.isnull(parsed_max): 
-        parsed_max = pd.Timestamp("2026-05-31")
+    if parsed_min is None or pd.isnull(parsed_min): parsed_min = pd.Timestamp("2025-04-01")
+    if parsed_max is None or pd.isnull(parsed_max): parsed_max = pd.Timestamp("2026-05-31")
     
     return table_name, date_col, parsed_min, parsed_max
 
@@ -157,7 +153,6 @@ else:
 
 # --- ⚡ TARGETED QUERY ENGINE ---
 def query_targeted_data(part_numbers):
-    """Queries ONLY the input part numbers from the database instead of loading everything."""
     if not part_numbers:
         return pd.DataFrame()
         
@@ -166,89 +161,85 @@ def query_targeted_data(part_numbers):
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    # Identify key tracking headers case-insensitively 
     actual_part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number']), columns[0])
     actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date']), columns[0])
     
-    placeholders = ', '.join(['?'] * len(part_numbers))
+    # 💡 FIX: Generate multiple match types (Upper, Lower, Integer) so NOTHING is missed by SQLite
+    params = []
+    for p in part_numbers:
+        p_str = str(p).strip()
+        params.extend([p_str, p_str.upper(), p_str.lower()])
+        try:
+            params.append(int(p_str))
+        except ValueError:
+            pass
+            
+    placeholders = ', '.join(['?'] * len(params))
     query = f"SELECT * FROM [{table_name}] WHERE [{actual_part_col}] IN ({placeholders})"
     
-    df = pd.read_sql_query(query, conn, params=part_numbers)
+    df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     
     if not df.empty:
-        # Normalize the column names to guarantee structure downstream
-        rename_map = {}
+        # Guarantee structured column naming internally
+        col_map = {}
         for col in df.columns:
-            if col.lower() == actual_part_col.lower():
-                rename_map[col] = 'PartNumber'
-            elif col.lower() == actual_date_col.lower():
-                rename_map[col] = 'InvoiceDate'
-            elif col.lower() == 'qty':
-                rename_map[col] = 'qty'
-            elif col.lower() in ['productcode', 'product code']:
-                rename_map[col] = 'Productcode'
-            elif col.lower() == 'description':
-                rename_map[col] = 'description'
-            elif col.lower() == 'area':
-                rename_map[col] = 'area'
-            elif col.lower() in ['rate', 'unit cost', 'unit_cost']:
-                rename_map[col] = 'rate'
-                
-        df.rename(columns=rename_map, inplace=True)
+            lower_col = col.lower().strip()
+            if lower_col == actual_part_col.lower(): col_map[col] = 'PartNumber'
+            elif lower_col == actual_date_col.lower(): col_map[col] = 'InvoiceDate'
+            elif lower_col in ['qty', 'quantity']: col_map[col] = 'qty'
+            elif lower_col in ['productcode', 'product code', 'part code']: col_map[col] = 'Productcode'
+            elif lower_col in ['description', 'item description', 'part desc']: col_map[col] = 'description'
+            elif lower_col in ['area', 'branch', 'location']: col_map[col] = 'area'
+            elif lower_col in ['rate', 'unit cost', 'unit_cost', 'price']: col_map[col] = 'rate'
+            
+        df.rename(columns=col_map, inplace=True)
+        
+        # Fallback to force create standard columns if completely missing
+        for req_col in ['PartNumber', 'InvoiceDate', 'qty', 'Productcode', 'description', 'area']:
+            if req_col not in df.columns:
+                df[req_col] = 0 if req_col == 'qty' else "N/A"
+        
+        # Enforce Uppercase strings to guarantee merge matching downstream
+        df['PartNumber'] = df['PartNumber'].astype(str).str.strip().str.upper()
         df['InvoiceDate'] = safe_parse_mixed_dates(df['InvoiceDate'])
             
     return df
 
 
 def generate_filtered_database(df, start_date, end_date):
-    """Processes trends and layouts ONLY for the targeted matches."""
-    if df.empty or 'InvoiceDate' not in df.columns:
+    if df.empty:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
-    part_col = 'PartNumber'
-    qty_col = 'qty' if 'qty' in df.columns else 'qty'
-    code_col = 'Productcode' if 'Productcode' in df.columns else 'Productcode'
-    desc_col = 'description' if 'description' in df.columns else 'description'
+    # 💡 FIX: Extract Master Details unconditionally. Even if a part has 0 sales in the specific date window, it won't say "Not Found"
+    master_info = df[['PartNumber', 'Productcode', 'description']].drop_duplicates(subset=['PartNumber'], keep='last').copy()
+    master_info.rename(columns={'Productcode': 'Product Code', 'description': 'Description'}, inplace=True)
 
     max_db_date = df['InvoiceDate'].max()
-    if pd.isnull(max_db_date): 
-        max_db_date = pd.Timestamp(end_date)
+    if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
         
     three_months_ago = max_db_date - pd.DateOffset(months=3)
     twelve_months_ago = max_db_date - pd.DateOffset(months=12)
 
-    # 💡 FIX: Compare natively using pandas Timestamps (Bypasses the NaT TypeError entirely)
     mask_3m = (df['InvoiceDate'] >= three_months_ago) & (df['InvoiceDate'] <= max_db_date)
     mask_12m = (df['InvoiceDate'] >= twelve_months_ago) & (df['InvoiceDate'] <= max_db_date)
     
-    qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
-    qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
+    qty_3m = df[mask_3m].groupby('PartNumber')['qty'].sum().reset_index(name='qty_3m')
+    qty_12m = df[mask_12m].groupby('PartNumber')['qty'].sum().reset_index(name='qty_12m')
     
     rate_col = 'rate' if 'rate' in df.columns else None
-    unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=[part_col, 'Unit Cost'])
+    unit_costs = df.groupby('PartNumber')[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=['PartNumber', 'Unit Cost'])
 
-    # Standardize the slider boundaries into timestamps covering the full day period
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
 
-    # Apply the same native Timestamp comparison constraint for the main table body
     mask = (df['InvoiceDate'] >= start_ts) & (df['InvoiceDate'] <= end_ts)
     filtered_df = df[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
-    area_col = 'area' if 'area' in filtered_df.columns else 'area'
-    
-    for col in [part_col, code_col, desc_col]:
-        if col not in filtered_df.columns: filtered_df[col] = "N/A"
-    if area_col not in filtered_df.columns: filtered_df[area_col] = "Unknown"
-    if qty_col not in filtered_df.columns: filtered_df[qty_col] = 0
 
-    pivot_qty = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns=area_col, values=qty_col, aggfunc='sum', fill_value=0).reset_index()
-    pivot_freq = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns=area_col, values=qty_col, aggfunc='count', fill_value=0).reset_index()
-    
-    pivot_qty.rename(columns={part_col: 'PartNumber', code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
-    pivot_freq.rename(columns={part_col: 'PartNumber', code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
+    pivot_qty = filtered_df.pivot_table(index=['PartNumber'], columns='area', values='qty', aggfunc='sum', fill_value=0).reset_index()
+    pivot_freq = filtered_df.pivot_table(index=['PartNumber'], columns='area', values='qty', aggfunc='count', fill_value=0).reset_index()
     
     for area in target_areas:
         matched_col = next((c for c in pivot_qty.columns if c.lower() == area.lower()), None)
@@ -265,13 +256,24 @@ def generate_filtered_database(df, start_date, end_date):
     freq_rename_map = {area: f"{area} Freq" for area in target_areas}
     pivot_freq.rename(columns=freq_rename_map, inplace=True)
     
-    merge_cols = ['PartNumber', 'Product Code', 'Description', 'Total Freq'] + list(freq_rename_map.values())
-    final_db = pd.merge(pivot_qty, pivot_freq[merge_cols], on=['PartNumber', 'Product Code', 'Description'], how='left')
+    # 💡 REBUILT MERGE PIPELINE: Build upon the Master Info framework unconditionally
+    final_db = master_info.copy()
     
-    qty_3m.rename(columns={part_col: 'PartNumber'}, inplace=True)
-    qty_12m.rename(columns={part_col: 'PartNumber'}, inplace=True)
-    unit_costs.rename(columns={part_col: 'PartNumber'}, inplace=True)
-    
+    # Merge Area Pivot quantities
+    if not pivot_qty.empty:
+        qty_merge_cols = ['PartNumber'] + target_areas + ['Total Qty']
+        final_db = pd.merge(final_db, pivot_qty[qty_merge_cols], on='PartNumber', how='left').fillna(0)
+    else:
+        for area in target_areas + ['Total Qty']: final_db[area] = 0
+        
+    # Merge Area Pivot frequencies
+    if not pivot_freq.empty:
+        freq_merge_cols = ['PartNumber'] + list(freq_rename_map.values()) + ['Total Freq']
+        final_db = pd.merge(final_db, pivot_freq[freq_merge_cols], on='PartNumber', how='left').fillna(0)
+    else:
+        for f_col in list(freq_rename_map.values()) + ['Total Freq']: final_db[f_col] = 0
+        
+    # Inject Trend and Cost properties
     final_db = pd.merge(final_db, qty_3m, on='PartNumber', how='left').fillna({'qty_3m': 0})
     final_db = pd.merge(final_db, qty_12m, on='PartNumber', how='left').fillna({'qty_12m': 0})
     final_db = pd.merge(final_db, unit_costs, on='PartNumber', how='left').fillna({'Unit Cost': 0.0})
@@ -319,7 +321,8 @@ edited_input = st.data_editor(
 if not edited_input.empty:
     valid_inputs = edited_input[edited_input["PartNumber"].astype(str).str.strip() != ""].copy()
     if not valid_inputs.empty:
-        valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str).str.strip()
+        # Enforce Uppercase on User input to match the guaranteed uppercase DB standard
+        valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str).str.strip().str.upper()
         
         unique_parts = valid_inputs['PartNumber'].unique().tolist()
         raw_targeted_df = query_targeted_data(unique_parts)
