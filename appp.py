@@ -45,7 +45,6 @@ def extract_master_db():
         cursor.execute(f"PRAGMA table_info([{table_name}])")
         columns = [col[1] for col in cursor.fetchall()]
         
-        # 💡 DYNAMIC CORRECTION: Handle precise lowercase variant "Partnumber"
         part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
         date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
         
@@ -80,7 +79,7 @@ def safe_parse_mixed_dates(series):
         
     return parsed_datetimes
 
-# --- ⚡ INSTANT METADATA FETCH ---
+# --- ⚡ INSTANT METADATA FETCH (COMPLETELY DYNAMIC) ---
 def get_db_metadata():
     """Fetches unique database strings and uses our parser to resolve true min/max constraints."""
     conn = sqlite3.connect(DB_FILE_PATH)
@@ -92,11 +91,11 @@ def get_db_metadata():
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    # 💡 Core layout column mapping logic alignment matching your specific spreadsheet snapshot
     date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
     
-    parsed_min = pd.Timestamp("2025-04-01")
-    parsed_max = pd.Timestamp("2026-04-30")
+    # Base fallback initialization 
+    parsed_min = None
+    parsed_max = None
     
     if date_col:
         try:
@@ -106,12 +105,20 @@ def get_db_metadata():
             if not unique_dates_df.empty:
                 converted_dates = safe_parse_mixed_dates(unique_dates_df[date_col]).dropna()
                 if not converted_dates.empty:
+                    # 💡 UPDATED: Set the time limits dynamically based on what's found in the file
                     parsed_min = converted_dates.min()
                     parsed_max = converted_dates.max()
         except Exception:
             pass
             
     conn.close()
+    
+    # 💡 Fallback defaults if the column is empty or un-parseable
+    if parsed_min is None or pd.isnull(parsed_min): 
+        parsed_min = pd.Timestamp("2025-04-01")
+    if parsed_max is None or pd.isnull(parsed_max): 
+        parsed_max = pd.Timestamp("2026-05-31")
+    
     return table_name, date_col, parsed_min, parsed_max
 
 table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
@@ -121,6 +128,7 @@ table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
 with st.sidebar:
     st.header("System Status")
     st.success("Master SQL Database Active (Indexed)")
+    # 🔄 This message will automatically scale outwards as you drop newer data inside the database
     st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
     
     if st.button("Force Synchronize with GitHub"):
@@ -168,7 +176,6 @@ def query_targeted_data(part_numbers):
     conn.close()
     
     if not df.empty:
-        # Standardize matching key columns to fallback references cleanly
         if part_col != 'PartNumber':
             df.rename(columns={part_col: 'PartNumber'}, inplace=True)
         if date_col_name in df.columns:
@@ -182,7 +189,6 @@ def generate_filtered_database(df, start_date, end_date):
     if df.empty:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
-    # Map precise structural properties matching internal SQLite schemas
     part_col = 'PartNumber'
     qty_col = 'qty' if 'qty' in df.columns else ('Quantity' if 'Quantity' in df.columns else 'qty')
     code_col = 'Productcode' if 'Productcode' in df.columns else ('Product Code' if 'Product Code' in df.columns else ('Part Code' if 'Part Code' in df.columns else 'Product Code'))
