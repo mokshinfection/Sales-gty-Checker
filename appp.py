@@ -10,7 +10,7 @@ st.set_page_config(page_title="Sales Quantity Checker", layout="wide")
 st.title("Sales Quantity Checker")
 
 # 🔴 WORKING PATHS 🔴
-GITHUB_ZIP_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip"
+GITHUB_ZIP_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.7z"
 DB_FILE_PATH = "Sales.db"
 
 # --- DB ENGINE CORE HELPERS ---
