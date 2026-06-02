@@ -165,9 +165,6 @@ def query_targeted_data(part_numbers):
     
     part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
     
-    # 💡 FIX: Force case-insensitive mapping for the active Date column name inside query results
-    actual_date_col = next((c for c in columns if c.lower() == date_col_name.lower()), columns[0])
-    
     placeholders = ', '.join(['?'] * len(part_numbers))
     query = f"SELECT * FROM [{table_name}] WHERE [{part_col}] IN ({placeholders})"
     
@@ -175,14 +172,16 @@ def query_targeted_data(part_numbers):
     conn.close()
     
     if not df.empty:
-        if part_col != 'PartNumber':
-            df.rename(columns={part_col: 'PartNumber'}, inplace=True)
+        # 💡 FIX: Standardize all columns to lower-case first to match variations instantly
+        df.columns = df.columns.str.lower()
         
-        # Standardize query dataframe date columns to match parent naming configurations
-        if actual_date_col != date_col_name:
-            df.rename(columns={actual_date_col: date_col_name}, inplace=True)
-            
-        # 💡 FIX: Safely parse and convert dates into real datetime structures before executing generate_filtered_database
+        # Force exact mapping names back to standard structural properties
+        df.rename(columns={
+            part_col.lower(): 'PartNumber',
+            date_col_name.lower(): date_col_name
+        }, inplace=True)
+        
+        # Safely convert the date values to datetime objects
         df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
             
     return df
@@ -194,9 +193,9 @@ def generate_filtered_database(df, start_date, end_date):
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
     part_col = 'PartNumber'
-    qty_col = 'qty' if 'qty' in df.columns else ('Quantity' if 'Quantity' in df.columns else 'qty')
-    code_col = 'Productcode' if 'Productcode' in df.columns else ('Product Code' if 'Product Code' in df.columns else ('Part Code' if 'Part Code' in df.columns else 'Product Code'))
-    desc_col = 'Description'
+    qty_col = 'qty' if 'qty' in df.columns else ('quantity' if 'quantity' in df.columns else 'qty')
+    code_col = 'productcode' if 'productcode' in df.columns else ('product code' if 'product code' in df.columns else 'productcode')
+    desc_col = 'description'
 
     max_db_date = df[date_col_name].max()
     if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
@@ -211,7 +210,7 @@ def generate_filtered_database(df, start_date, end_date):
     qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
     qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
-    rate_col = 'Rate' if 'Rate' in df.columns else ('Unit Cost' if 'Unit Cost' in df.columns else None)
+    rate_col = 'rate' if 'rate' in df.columns else ('unit cost' if 'unit cost' in df.columns else ('unit_cost' if 'unit_cost' in df.columns else None))
     unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=[part_col, 'Unit Cost'])
 
     mask = (df[date_col_name].dt.date >= start_date) & (df[date_col_name].dt.date <= end_date)
@@ -219,18 +218,29 @@ def generate_filtered_database(df, start_date, end_date):
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
+    # 💡 FIX: Keep things lower-case to easily match internal database values
+    area_col = 'area' if 'area' in filtered_df.columns else 'Area'
+    
     for col in [part_col, code_col, desc_col]:
         if col not in filtered_df.columns: filtered_df[col] = "N/A"
-    if 'Area' not in filtered_df.columns: filtered_df['Area'] = "Unknown"
+    if area_col not in filtered_df.columns: filtered_df[area_col] = "Unknown"
     if qty_col not in filtered_df.columns: filtered_df[qty_col] = 0
 
-    pivot_qty = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns='Area', values=qty_col, aggfunc='sum', fill_value=0).reset_index()
-    pivot_freq = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns='Area', values=qty_col, aggfunc='count', fill_value=0).reset_index()
+    pivot_qty = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns=area_col, values=qty_col, aggfunc='sum', fill_value=0).reset_index()
+    pivot_freq = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns=area_col, values=qty_col, aggfunc='count', fill_value=0).reset_index()
     
-    pivot_qty.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
-    pivot_freq.rename(columns={part_col: 'PartNumber', code_col: 'Product Code'}, inplace=True)
+    # Capitalize display columns for the final report layout
+    pivot_qty.rename(columns={part_col: 'PartNumber', code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
+    pivot_freq.rename(columns={part_col: 'PartNumber', code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
     
+    # Fix casing for target areas
     for area in target_areas:
+        # Match case-insensitively
+        matched_col = next((c for c in pivot_qty.columns if c.lower() == area.lower()), None)
+        if matched_col and matched_col != area:
+            pivot_qty.rename(columns={matched_col: area}, inplace=True)
+            pivot_freq.rename(columns={matched_col: area}, inplace=True)
+            
         if area not in pivot_qty.columns: pivot_qty[area] = 0
         if area not in pivot_freq.columns: pivot_freq[area] = 0
             
