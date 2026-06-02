@@ -34,7 +34,7 @@ def extract_master_db():
                     os.remove(DB_FILE_PATH)
                 os.rename(db_filename, DB_FILE_PATH)
         
-        # ⚡ SPEED BOOST: Create indexes on the database to make lookups blindingly fast
+        # ⚡ SPEED BOOST: Create indexes based on your exact schema
         conn = sqlite3.connect(DB_FILE_PATH)
         cursor = conn.cursor()
         
@@ -42,15 +42,8 @@ def extract_master_db():
         tables = cursor.fetchall()
         table_name = tables[0][0] if tables else "sales_records"
         
-        cursor.execute(f"PRAGMA table_info([{table_name}])")
-        columns = [col[1] for col in cursor.fetchall()]
-        
-        # Find column variants case-insensitively
-        part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
-        date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
-        
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([PartNumber]);")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([Invoice_Date]);")
         conn.commit()
         conn.close()
                 
@@ -65,59 +58,51 @@ if not os.path.exists(DB_FILE_PATH):
 
 # --- 🔄 ADVANCED MULTI-FORMAT DATE PARSER ---
 def safe_parse_mixed_dates(series):
-    """Processes clean string dates and raw numerical Excel serial numbers at the same time."""
+    """Processes clean string dates and raw numerical Excel serial numbers safely."""
     str_series = series.astype(str).str.strip()
     is_numeric = str_series.str.match(r'^\d+(\.\d+)?$')
+    
+    # Strictly enforce a Pandas datetime64 array to prevent comparison TypeErrors
     parsed_datetimes = pd.Series(pd.NaT, index=series.index, dtype='datetime64[ns]')
     
     if is_numeric.any():
         numeric_vals = pd.to_numeric(str_series[is_numeric], errors='coerce')
         parsed_datetimes.loc[is_numeric] = pd.to_datetime(numeric_vals, origin='1899-12-30', unit='D')
         
-    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series != 'nan') & str_series.notna()
+    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series.str.lower() != 'nan') & str_series.notna()
     if non_numeric_mask.any():
         parsed_datetimes.loc[non_numeric_mask] = pd.to_datetime(str_series[non_numeric_mask], dayfirst=True, errors='coerce')
         
     return parsed_datetimes
 
-# --- ⚡ INSTANT METADATA FETCH (COMPLETELY DYNAMIC) ---
+# --- ⚡ INSTANT METADATA FETCH (EXACT SCHEMA) ---
 def get_db_metadata():
-    """Fetches unique database strings and uses our parser to resolve true min/max constraints."""
     conn = sqlite3.connect(DB_FILE_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
     tables = cursor.fetchall()
     table_name = tables[0][0] if tables else "sales_records"
     
-    cursor.execute(f"PRAGMA table_info([{table_name}])")
-    columns = [col[1] for col in cursor.fetchall()]
+    parsed_min = pd.Timestamp("2025-04-01")
+    parsed_max = pd.Timestamp("2026-05-31")
     
-    date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
-    
-    parsed_min = None
-    parsed_max = None
-    
-    if date_col:
-        try:
-            query = f"SELECT DISTINCT [{date_col}] FROM [{table_name}] WHERE [{date_col}] IS NOT NULL AND [{date_col}] != ''"
-            unique_dates_df = pd.read_sql_query(query, conn)
-            
-            if not unique_dates_df.empty:
-                converted_dates = safe_parse_mixed_dates(unique_dates_df[date_col]).dropna()
-                if not converted_dates.empty:
-                    parsed_min = converted_dates.min()
-                    parsed_max = converted_dates.max()
-        except Exception:
-            pass
+    try:
+        # Fetching exact Invoice_Date column
+        query = f"SELECT DISTINCT [Invoice_Date] FROM [{table_name}] WHERE [Invoice_Date] IS NOT NULL AND [Invoice_Date] != ''"
+        unique_dates_df = pd.read_sql_query(query, conn)
+        
+        if not unique_dates_df.empty:
+            converted_dates = safe_parse_mixed_dates(unique_dates_df['Invoice_Date']).dropna()
+            if not converted_dates.empty:
+                parsed_min = converted_dates.min()
+                parsed_max = converted_dates.max()
+    except Exception:
+        pass
             
     conn.close()
-    
-    if parsed_min is None or pd.isnull(parsed_min): parsed_min = pd.Timestamp("2025-04-01")
-    if parsed_max is None or pd.isnull(parsed_max): parsed_max = pd.Timestamp("2026-05-31")
-    
-    return table_name, date_col, parsed_min, parsed_max
+    return table_name, parsed_min, parsed_max
 
-table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
+table_name, db_min_date, db_max_date = get_db_metadata()
 
 
 # --- SIDEBAR: SYSTEM STATUS ---
@@ -150,72 +135,15 @@ else:
     date_range = st.slider("Select Custom Date Range", min_value=db_min_date.date(), max_value=db_max_date.date(), value=(db_min_date.date(), db_max_date.date()), format="DD/MM/YY")
     start_date, end_date = date_range[0], date_range[1]
 
-# --- 💡 DEEP FUZZY COLUMN MATCHER ---
-def normalize_columns(df, actual_part_col, actual_date_col):
-    """Automatically maps whatever column names you have to the names the system needs."""
-    exact_qty = ['qty', 'quantity', 'billed qty', 'invoice qty', 'invoiced qty', 'issue qty', 'sold qty', 'total qty']
-    exact_code = ['productcode', 'product code', 'part code', 'item code', 'material code', 'group', 'product group', 'item group', 'category', 'hsn code', 'family', 'hsn']
-    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc', 'part desc', 'nomenclature', 'name']
-    exact_area = ['area', 'branch', 'location', 'plant', 'site', 'warehouse', 'region', 'city']
-    exact_rate = ['rate', 'unit cost', 'unit_cost', 'price', 'unit price', 'basic price', 'mrp', 'cost', 'item price', 'net price', 'value', 'basic rate', 'amount']
 
-    # Phase 1: Try Exact matches
-    col_map = {}
-    for col in df.columns:
-        l_col = col.lower().strip()
-        if l_col == actual_part_col.lower(): col_map[col] = 'PartNumber'
-        elif l_col == actual_date_col.lower(): col_map[col] = 'InvoiceDate'
-        elif l_col in exact_qty: col_map[col] = 'qty'
-        elif l_col in exact_code: col_map[col] = 'Productcode'
-        elif l_col in exact_desc: col_map[col] = 'description'
-        elif l_col in exact_area: col_map[col] = 'area'
-        elif l_col in exact_rate: col_map[col] = 'rate'
-
-    df.rename(columns=col_map, inplace=True)
-    
-    # Phase 2: Fuzzy Substring Matching for anything still missing
-    current_mapped = list(col_map.values())
-    fuzzy_map = {}
-    for col in df.columns:
-        if col in current_mapped: continue
-        l_col = col.lower().strip()
-        
-        if 'qty' not in current_mapped and 'qty' not in fuzzy_map.values() and ('qty' in l_col or 'quant' in l_col):
-            fuzzy_map[col] = 'qty'
-        elif 'Productcode' not in current_mapped and 'Productcode' not in fuzzy_map.values() and ('code' in l_col or 'group' in l_col or 'cat' in l_col):
-            fuzzy_map[col] = 'Productcode'
-        elif 'description' not in current_mapped and 'description' not in fuzzy_map.values() and ('desc' in l_col):
-            fuzzy_map[col] = 'description'
-        elif 'area' not in current_mapped and 'area' not in fuzzy_map.values() and ('branch' in l_col or 'loc' in l_col or 'plant' in l_col):
-            fuzzy_map[col] = 'area'
-        elif 'rate' not in current_mapped and 'rate' not in fuzzy_map.values() and ('price' in l_col or 'cost' in l_col or 'rate' in l_col):
-            fuzzy_map[col] = 'rate'
-            
-    df.rename(columns=fuzzy_map, inplace=True)
-    
-    # Phase 3: Absolute Fallback Creation
-    for req_col in ['PartNumber', 'InvoiceDate', 'qty', 'Productcode', 'description', 'area', 'rate']:
-        if req_col not in df.columns:
-            if req_col == 'qty': df[req_col] = 0
-            elif req_col == 'rate': df[req_col] = 0.0
-            else: df[req_col] = "N/A"
-            
-    return df
-
-# --- ⚡ TARGETED QUERY ENGINE ---
+# --- ⚡ EXACT SCHEMA QUERY ENGINE ---
 def query_targeted_data(part_numbers):
     if not part_numbers:
         return pd.DataFrame()
         
     conn = sqlite3.connect(DB_FILE_PATH)
-    cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info([{table_name}])")
-    columns = [col[1] for col in cursor.fetchall()]
     
-    actual_part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
-    actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
-    
-    # Guarantee we catch the parts even if they are integers or text formats in SQLite
+    # Create multiple match checks
     params = []
     for p in part_numbers:
         p_str = str(p).strip()
@@ -224,55 +152,79 @@ def query_targeted_data(part_numbers):
         except ValueError: pass
             
     placeholders = ', '.join(['?'] * len(params))
-    query = f"SELECT * FROM [{table_name}] WHERE [{actual_part_col}] IN ({placeholders})"
+    query = f"SELECT * FROM [{table_name}] WHERE [PartNumber] IN ({placeholders})"
     
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     
     if not df.empty:
-        df = normalize_columns(df, actual_part_col, actual_date_col)
+        # Standardize column casing dynamically just in case SQLite mutated them
+        col_map = {}
+        for col in df.columns:
+            lc = col.lower()
+            if lc == 'partnumber': col_map[col] = 'PartNumber'
+            elif lc == 'invoice_date': col_map[col] = 'Invoice_Date'
+            elif lc == 'qty': col_map[col] = 'qty'
+            elif lc == 'product_code': col_map[col] = 'Product_Code'
+            elif lc == 'description': col_map[col] = 'Description'
+            elif lc == 'area': col_map[col] = 'Area'
+            elif lc == 'cost': col_map[col] = 'Cost'
+            
+        df.rename(columns=col_map, inplace=True)
+        
+        # Enforce properties using Exact Schema Names
         df['PartNumber'] = df['PartNumber'].astype(str).str.strip().str.upper()
-        df['InvoiceDate'] = safe_parse_mixed_dates(df['InvoiceDate'])
+        df['Invoice_Date'] = safe_parse_mixed_dates(df['Invoice_Date'])
             
     return df
 
 def generate_filtered_database(df, start_date, end_date):
-    if df.empty or 'InvoiceDate' not in df.columns:
+    if df.empty or 'Invoice_Date' not in df.columns:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
-    part_col, qty_col, code_col, desc_col = 'PartNumber', 'qty', 'Productcode', 'description'
-    rate_col = 'rate'
-    area_col = 'area'
+    # Explicit Variables from user Schema
+    part_col = 'PartNumber'
+    qty_col = 'qty'
+    code_col = 'Product_Code'
+    desc_col = 'Description'
+    rate_col = 'Cost'
+    area_col = 'Area'
 
+    # Master details pulled perfectly based on your DB columns
     master_info = df[[part_col, code_col, desc_col]].drop_duplicates(subset=[part_col], keep='last').copy()
-    master_info.rename(columns={code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
+    
+    # Valid Dates only to prevent math crashes
+    df_valid = df.dropna(subset=['Invoice_Date']).copy()
 
-    max_db_date = df['InvoiceDate'].max()
+    max_db_date = df_valid['Invoice_Date'].max()
     if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
         
     three_months_ago = max_db_date - pd.DateOffset(months=3)
     twelve_months_ago = max_db_date - pd.DateOffset(months=12)
 
-    mask_3m = (df['InvoiceDate'] >= three_months_ago) & (df['InvoiceDate'] <= max_db_date)
-    mask_12m = (df['InvoiceDate'] >= twelve_months_ago) & (df['InvoiceDate'] <= max_db_date)
+    mask_3m = (df_valid['Invoice_Date'] >= three_months_ago) & (df_valid['Invoice_Date'] <= max_db_date)
+    mask_12m = (df_valid['Invoice_Date'] >= twelve_months_ago) & (df_valid['Invoice_Date'] <= max_db_date)
     
-    qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
-    qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
+    qty_3m = df_valid[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
+    qty_12m = df_valid[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
     unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost')
 
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
 
-    mask = (df['InvoiceDate'] >= start_ts) & (df['InvoiceDate'] <= end_ts)
-    filtered_df = df[mask].copy()
+    mask = (df_valid['Invoice_Date'] >= start_ts) & (df_valid['Invoice_Date'] <= end_ts)
+    filtered_df = df_valid[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
+
+    # Pre-fill structural fallbacks if entirely absent from a query
+    if area_col not in filtered_df.columns: filtered_df[area_col] = "Unknown"
+    if qty_col not in filtered_df.columns: filtered_df[qty_col] = 0
 
     pivot_qty = filtered_df.pivot_table(index=[part_col], columns=area_col, values=qty_col, aggfunc='sum', fill_value=0).reset_index()
     pivot_freq = filtered_df.pivot_table(index=[part_col], columns=area_col, values=qty_col, aggfunc='count', fill_value=0).reset_index()
     
-    # 💡 GLOBAL SUM FIX: Sums all branches across the timeline, even if spelled weirdly
     pivot_qty['Total Qty'] = pivot_qty.drop(columns=[part_col], errors='ignore').sum(axis=1)
     pivot_freq['Total Freq'] = pivot_freq.drop(columns=[part_col], errors='ignore').sum(axis=1)
 
@@ -360,12 +312,12 @@ if not edited_input.empty:
             result_df = pd.merge(valid_inputs, database, on="PartNumber", how="left")
         else:
             result_df = valid_inputs.copy()
-            for col in ['Product Code', 'Description', 'Total Qty', 'Total Freq', 'Trend']:
+            for col in ['Product_Code', 'Description', 'Total Qty', 'Total Freq', 'Trend']:
                 result_df[col] = "Not Found" if col in ['Description', 'Trend'] else 0
             result_df['Unit Cost'] = 0.0
 
         result_df['Description'] = result_df['Description'].fillna("Not Found")
-        result_df['Product Code'] = result_df['Product Code'].fillna("N/A")
+        result_df['Product_Code'] = result_df.get('Product_Code', result_df.get('Product Code', pd.Series("N/A", index=result_df.index))).fillna("N/A")
         result_df['Unit Cost'] = result_df['Unit Cost'].fillna(0.0)
         result_df['Trend'] = result_df['Trend'].fillna("🟡 Moderate Trend")
         result_df['Order Qty'] = result_df['Order Qty'].fillna(0).astype(int)
@@ -380,24 +332,28 @@ if not edited_input.empty:
         st.info(f"**Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %b %Y')}** to **{end_date.strftime('%d %B %Y')}**")
         
         view_mode = st.radio("Select Display Format:", ["Color-Coded Detailed View", "Compact View (Text Combined)"], horizontal=True)
-        leading_cols = ['PartNumber', 'Product Code', 'Description', 'Order Qty', 'Unit Cost', 'Total Cost', 'Trend']
+        leading_cols = ['PartNumber', 'Product_Code', 'Description', 'Order Qty', 'Unit Cost', 'Total Cost', 'Trend']
+        
+        # Guard rename for UI presentation
+        display_res_df = result_df.rename(columns={'Product_Code': 'Product Code'}).copy()
+        display_leading_cols = ['PartNumber', 'Product Code', 'Description', 'Order Qty', 'Unit Cost', 'Total Cost', 'Trend']
         
         if view_mode == "Compact View (Text Combined)":
-            display_df = result_df[[c for c in leading_cols if c in result_df.columns]].copy()
+            display_df = display_res_df[[c for c in display_leading_cols if c in display_res_df.columns]].copy()
             for area in areas:
-                if area in result_df.columns:
-                    display_df[area] = "Qty: " + result_df[area].astype(str) + " | Freq: " + result_df[f"{area} Freq"].astype(str)
-            if 'Total Qty' in result_df.columns:
-                display_df['Total'] = "Qty: " + result_df['Total Qty'].astype(str) + " | Freq: " + result_df['Total Freq'].astype(str)
+                if area in display_res_df.columns:
+                    display_df[area] = "Qty: " + display_res_df[area].astype(str) + " | Freq: " + display_res_df[f"{area} Freq"].astype(str)
+            if 'Total Qty' in display_res_df.columns:
+                display_df['Total'] = "Qty: " + display_res_df['Total Qty'].astype(str) + " | Freq: " + display_res_df['Total Freq'].astype(str)
             st.dataframe(display_df, width="stretch")
             
         else:
-            display_cols = list(leading_cols)
+            display_cols = list(display_leading_cols)
             for area in areas:
                 display_cols.extend([area, f"{area} Freq"])
             display_cols.extend(['Total Qty', 'Total Freq'])
             
-            detailed_df = result_df[[c for c in display_cols if c in result_df.columns]]
+            detailed_df = display_res_df[[c for c in display_cols if c in display_res_df.columns]]
             
             def color_columns(col):
                 if col.name == "Trend":
@@ -417,11 +373,11 @@ if not edited_input.empty:
             st.dataframe(styled_df, width="stretch")
         
         # --- EXCEL DOWNLOAD ---
-        export_cols = list(leading_cols)
+        export_cols = list(display_leading_cols)
         for area in areas:
             export_cols.extend([area, f"{area} Freq"])
         export_cols.extend(['Total Qty', 'Total Freq'])
-        export_df = result_df[[c for c in export_cols if c in result_df.columns]]
+        export_df = display_res_df[[c for c in export_cols if c in display_res_df.columns]]
         
         st.download_button(
             label="Download Full Report (Excel)",
