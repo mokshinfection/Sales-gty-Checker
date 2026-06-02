@@ -2,29 +2,49 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
-import zipfile
+import sqlite3
+import os
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Sales Quantity Checker", layout="wide")
 st.title("Sales Quantity Checker")
 
-# 🔴 GITHUB RAW URL 🔴
-GITHUB_CSV_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip"
+# 🔴 WORKING PATHS 🔴
+GITHUB_ZIP_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip"
+DB_FILE_PATH = "Sales.db"
 
-# --- DATA PROCESSING (NOW LOADS FULL DATA IN CACHE) ---
+# --- DB ENGINE CORE HELPERS ---
+def create_sqlite_db_from_df(df, table_name="sales_records"):
+    """Packs an initial base dataframe into a clean local SQLite structure."""
+    conn = sqlite3.connect(DB_FILE_PATH)
+    df_to_save = df.copy()
+    date_col = 'Invoice Date' if 'Invoice Date' in df_to_save.columns else 'Date'
+    if date_col in df_to_save.columns:
+        df_to_save[date_col] = df_to_save[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+        
+    df_to_save.to_sql(table_name, conn, if_exists='replace', index=False)
+    conn.commit()
+    conn.close()
+
+# --- DATA PROCESSING (CACHED FROM SQLITE) ---
 @st.cache_data(ttl=3600)
-def load_raw_backend_data(url):
-    """Fetches full historical data from GitHub and caches it."""
-    df = pd.read_csv(url, compression='zip', low_memory=False, on_bad_lines='skip')
-    df.columns = df.columns.str.strip()
+def load_backend_data_from_sqlite():
+    """Loads historical sales matrix records directly out of the SQLite Engine."""
+    if not os.path.exists(DB_FILE_PATH):
+        with st.spinner("Downloading base initialization matrix from GitHub..."):
+            initial_df = pd.read_csv(GITHUB_ZIP_URL, compression='zip', low_memory=False, on_bad_lines='skip')
+            initial_df.columns = initial_df.columns.str.strip()
+            date_col = 'Invoice Date' if 'Invoice Date' in initial_df.columns else 'Date'
+            initial_df[date_col] = pd.to_datetime(initial_df[date_col], dayfirst=True, errors='coerce')
+            initial_df = initial_df.dropna(subset=[date_col])
+            create_sqlite_db_from_df(initial_df)
+
+    conn = sqlite3.connect(DB_FILE_PATH)
+    df = pd.read_sql_query("SELECT * FROM sales_records", conn)
+    conn.close()
     
     date_col = 'Invoice Date' if 'Invoice Date' in df.columns else 'Date'
-    if date_col not in df.columns:
-        raise KeyError(f"Could not find a date column. Columns found: {', '.join(df.columns)}")
-        
-    df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
-    df = df.dropna(subset=[date_col]) 
-    
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     return df, date_col
 
 def generate_filtered_database(df, date_col, start_date, end_date):
@@ -78,55 +98,89 @@ def convert_df_to_excel(df):
 with st.sidebar:
     st.header("System Status")
     try:
-        with st.spinner("Fetching full historical data from GitHub..."):
-            raw_data, date_col_name = load_raw_backend_data(GITHUB_CSV_URL)
-            db_min_date = raw_data[date_col_name].min().date()
-            db_max_date = raw_data[date_col_name].max().date()
+        raw_data, date_col_name = load_backend_data_from_sqlite()
+        db_min_date = raw_data[date_col_name].min().date()
+        db_max_date = raw_data[date_col_name].max().date()
             
-        st.success("Database Active & In-Memory")
+        st.success("SQLite Engine Active")
         st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
         
         if st.button("Force Data Refresh"):
             st.cache_data.clear()
             st.rerun()
     except Exception as e:
-        st.error(f"Failed to load data from GitHub.\n\nError: {e}")
+        st.error(f"Failed to load data from SQLite instance.\n\nError: {e}")
         st.stop()
         
     st.divider()
     st.header("Update Master Database")
-    st.write("Upload your new data files to merge them with the base file.")
+    st.write("Upload your new monthly files. You can also drop your previous `Sales.db` file here to keep appending incrementally.")
     
-    # 🔄 MULTI-FILE LOADING ENABLED HERE
-    monthly_files = st.file_uploader("Upload New Month Data Files", type=["csv", "xlsx"], accept_multiple_files=True)
+    monthly_files = st.file_uploader("Upload Data Files (.csv, .xlsx, .db)", type=["csv", "xlsx", "db"], accept_multiple_files=True)
     
     if monthly_files:
         try:
             new_dataframes = []
+            
+            # First, check if the user uploaded an existing database snapshot to build upon
+            for file in monthly_files:
+                if file.name.endswith('.db'):
+                    with open(DB_FILE_PATH, "wb") as f:
+                        f.write(file.getbuffer())
+                    st.info("Found an uploaded database file. Restoring it as the active workspace backend...")
+            
+            # Process all accompanying flat files (Excel/CSV)
             for file in monthly_files:
                 if file.name.endswith('.csv'):
                     df_temp = pd.read_csv(file, low_memory=False)
-                else:
+                    df_temp.columns = df_temp.columns.str.strip()
+                    new_dataframes.append(df_temp)
+                elif file.name.endswith('.xlsx'):
                     df_temp = pd.read_excel(file)
-                
-                df_temp.columns = df_temp.columns.str.strip()
-                new_dataframes.append(df_temp)
-                
-            with st.spinner("Merging all files with Master Database..."):
-                raw_base_df = pd.read_csv(GITHUB_CSV_URL, compression='zip', low_memory=False, on_bad_lines='skip')
-                raw_base_df.columns = raw_base_df.columns.str.strip()
-                
-                all_dfs = [raw_base_df] + new_dataframes
-                updated_master_df = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
-                
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    zip_file.writestr("Sales.csv", updated_master_df.to_csv(index=False)) 
+                    df_temp.columns = df_temp.columns.str.strip()
+                    new_dataframes.append(df_temp)
+            
+            if new_dataframes:
+                with st.spinner("Appending new records directly to existing database..."):
+                    conn = sqlite3.connect(DB_FILE_PATH)
                     
-                st.success(f"Successfully Merged {len(monthly_files)} file(s)! Total Size: {len(updated_master_df)} rows.")
-                st.download_button("Download New Master File (.zip)", data=zip_buffer.getvalue(), file_name="Sales.zip", mime="application/zip")
+                    for incoming_df in new_dataframes:
+                        t_date = 'Invoice Date' if 'Invoice Date' in incoming_df.columns else 'Date'
+                        if t_date in incoming_df.columns:
+                            incoming_df[t_date] = pd.to_datetime(incoming_df[t_date], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        # 🔄 APPEND STRATEGY: Directly insert rows into the existing sqlite table
+                        incoming_df.to_sql("sales_records", conn, if_exists='append', index=False)
+                    
+                    # Read back, drop exact duplicates across the consolidated historical set, and save back
+                    dedup_df = pd.read_sql_query("SELECT * FROM sales_records", conn)
+                    dedup_df = dedup_df.drop_duplicates()
+                    dedup_df.to_sql("sales_records", conn, if_exists='replace', index=False)
+                    conn.close()
+                    st.success("New data successfully appended and deduplicated!")
+            
+            # Recalculate total rows currently stored
+            conn = sqlite3.connect(DB_FILE_PATH)
+            final_row_count = conn.execute("SELECT count(*) FROM sales_records").fetchone()[0]
+            conn.close()
+            
+            st.metric("Total Consolidated Records", f"{final_row_count:,} rows")
+            st.cache_data.clear()
+            
+            # Provide the master database file download to save local progress
+            with open(DB_FILE_PATH, "rb") as f:
+                st.download_button(
+                    label="Download Updated Master Database (.db)",
+                    data=f.read(),
+                    file_name="Sales.db",
+                    mime="application/x-sqlite3"
+                )
+                
+            if st.button("Refresh Interface View"):
+                st.rerun()
+                
         except Exception as e:
-            st.error(f"Error merging files: {e}")
+            st.error(f"Error executing database append operations: {e}")
 
 
 # --- DATE FILTERING UI ---
@@ -200,7 +254,6 @@ if not edited_input.empty:
                 display_df[area] = "Qty: " + result_df[area].astype(str) + " | Freq: " + result_df[f"{area} Freq"].astype(str)
             display_df['Total'] = "Qty: " + result_df['Total Qty'].astype(str) + " | Freq: " + result_df['Total Freq'].astype(str)
             
-            # 💡 UPDATED: use_container_width=True changed to width='stretch' to match your logs' warning
             st.dataframe(display_df, width="stretch")
             
         else:
@@ -220,8 +273,6 @@ if not edited_input.empty:
                     return [''] * len(col)
 
             styled_df = detailed_df.style.apply(color_columns, axis=0)
-            
-            # 💡 UPDATED: use_container_width=True changed to width='stretch'
             st.dataframe(styled_df, width="stretch")
         
         # --- EXCEL DOWNLOAD ---
