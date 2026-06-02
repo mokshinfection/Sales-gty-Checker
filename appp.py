@@ -43,15 +43,15 @@ def extract_master_db():
         tables = cursor.fetchall()
         table_name = tables[0][0] if tables else "sales_records"
         
-        # Detect exact column names to match index configurations
-        cursor.execute(f"PRAGMA table_info({table_name})")
+        # 💡 FIXED: Wrapped table name in square brackets [ ] to handle spaces/special characters safely
+        cursor.execute(f"PRAGMA table_info([{table_name}])")
         columns = [col[1] for col in cursor.fetchall()]
         part_col = 'PartNumber' if 'PartNumber' in columns else 'Part Number'
         date_col = 'Invoice Date' if 'Invoice Date' in columns else 'Date'
         
         # Apply Indexes
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON {table_name} ([{part_col}]);")
-        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON {table_name} ([{date_col}]);")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
         conn.commit()
         conn.close()
                 
@@ -73,12 +73,13 @@ def get_db_metadata():
     tables = cursor.fetchall()
     table_name = tables[0][0] if tables else "sales_records"
     
-    cursor.execute(f"PRAGMA table_info({table_name})")
+    # 💡 FIXED: Wrapped table name in square brackets [ ] to resolve the crash
+    cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     date_col = 'Invoice Date' if 'Invoice Date' in columns else 'Date'
     
     # Fast min/max lookup using our new index
-    cursor.execute(f"SELECT MIN([{date_col}]), MAX([{date_col}]) FROM {table_name}")
+    cursor.execute(f"SELECT MIN([{date_col}]), MAX([{date_col}]) FROM [{table_name}]")
     min_d, max_d = cursor.fetchone()
     conn.close()
     
@@ -118,7 +119,7 @@ else:
     start_date, end_date = date_range[0], date_range[1]
 
 
-# --- ⚡ TARGETED QUERY ENGINE (THE SPEED FIX) ---
+# --- ⚡ TARGETED QUERY ENGINE ---
 def query_targeted_data(part_numbers):
     """Queries ONLY the input part numbers from the database instead of loading everything."""
     if not part_numbers:
@@ -128,13 +129,13 @@ def query_targeted_data(part_numbers):
     
     # Get standard table column names dynamically
     cursor = conn.cursor()
-    cursor.execute(f"PRAGMA table_info({table_name})")
+    cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     part_col = 'PartNumber' if 'PartNumber' in columns else 'Part Number'
     
     # Safely inject part numbers into localized parameterized SQL query
     placeholders = ', '.join(['?'] * len(part_numbers))
-    query = f"SELECT * FROM {table_name} WHERE [{part_col}] IN ({placeholders})"
+    query = f"SELECT * FROM [{table_name}] WHERE [{part_col}] IN ({placeholders})"
     
     df = pd.read_sql_query(query, conn, params=part_numbers)
     conn.close()
