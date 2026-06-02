@@ -17,29 +17,31 @@ GITHUB_7Z_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Chec
 DB_FILE_PATH = "Sales.db"
 
 def extract_and_init_sqlite():
-    """Downloads sales.7z, extracts the internal CSV file, and seeds the SQLite backend."""
+    """Downloads sales.7z, extracts it locally, and seeds the SQLite backend safely."""
     try:
         # Download the compressed .7z archive from GitHub
         with urllib.request.urlopen(GITHUB_7Z_URL) as response:
             archive_bytes = response.read()
             
-        # Extract the CSV contents completely in-memory
+        # Extract the archive onto the local server instance path directly
         with py7zr.SevenZipFile(io.BytesIO(archive_bytes), mode='r') as archive:
-            # 🔄 FIXED: Changed getallnames() to getnames()
             extracted_data = archive.getnames()
             
-            # Find the first target CSV inside the archive
+            # Identify the target CSV name inside the archive structure
             csv_filename = next((name for name in extracted_data if name.endswith('.csv')), None)
             if not csv_filename:
                 raise FileNotFoundError("Could not locate a valid .csv file inside the downloaded sales.7z archive.")
-                
-            # Extract out the specific target file contents
-            extracted_dict = archive.read([csv_filename])
-            csv_bytes = extracted_dict[csv_filename].read()
+            
+            # Extract everything cleanly to the local workspace directory
+            archive.extractall(path=".")
 
-        # Load into Pandas, clean column padding strings, and format datetimes
-        df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False, on_bad_lines='skip')
+        # Read the newly extracted local CSV file via Pandas
+        df = pd.read_csv(csv_filename, low_memory=False, on_bad_lines='skip')
         df.columns = df.columns.str.strip()
+        
+        # Cleanup the temporary extracted CSV file to save server storage
+        if os.path.exists(csv_filename):
+            os.remove(csv_filename)
         
         date_col = 'Invoice Date' if 'Invoice Date' in df.columns else 'Date'
         if date_col not in df.columns:
