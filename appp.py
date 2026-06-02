@@ -45,10 +45,9 @@ def extract_master_db():
         cursor.execute(f"PRAGMA table_info([{table_name}])")
         columns = [col[1] for col in cursor.fetchall()]
         
-        part_col = 'PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0])
-        date_col = 'Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else None)
-        if not date_col:
-            date_col = next((col for col in columns if 'date' in col.lower()), columns[0])
+        # 💡 DYNAMIC CORRECTION: Handle precise lowercase variant "Partnumber"
+        part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
+        date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
         
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
@@ -67,27 +66,21 @@ if not os.path.exists(DB_FILE_PATH):
 # --- 🔄 ADVANCED MULTI-FORMAT DATE PARSER ---
 def safe_parse_mixed_dates(series):
     """Processes clean string dates and raw numerical Excel serial numbers at the same time."""
-    # Convert series elements to stripped strings safely
     str_series = series.astype(str).str.strip()
-    
-    # Check if a row is numeric (Excel timestamps like 46022)
     is_numeric = str_series.str.match(r'^\d+(\.\d+)?$')
-    
     parsed_datetimes = pd.Series(pd.NaT, index=series.index)
     
-    # 1. Parse Excel Serial Numbers
     if is_numeric.any():
         numeric_vals = pd.to_numeric(str_series[is_numeric], errors='coerce')
         parsed_datetimes[is_numeric] = pd.to_datetime(numeric_vals, origin='1899-12-30', unit='D')
         
-    # 2. Parse Standard String Date Text (DD-MM-YYYY / DD/MM/YYYY)
     non_numeric_mask = ~is_numeric & (str_series != '') & (str_series != 'nan')
     if non_numeric_mask.any():
         parsed_datetimes[non_numeric_mask] = pd.to_datetime(str_series[non_numeric_mask], dayfirst=True, errors='coerce')
         
     return parsed_datetimes
 
-# --- ⚡ INSTANT METADATA FETCH (CHRONOLOGICALLY RECONSTRUCTED) ---
+# --- ⚡ INSTANT METADATA FETCH ---
 def get_db_metadata():
     """Fetches unique database strings and uses our parser to resolve true min/max constraints."""
     conn = sqlite3.connect(DB_FILE_PATH)
@@ -99,9 +92,8 @@ def get_db_metadata():
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    date_col = 'Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else None)
-    if not date_col:
-        date_col = next((col for col in columns if 'date' in col.lower()), None)
+    # 💡 Core layout column mapping logic alignment matching your specific spreadsheet snapshot
+    date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
     
     parsed_min = pd.Timestamp("2025-04-01")
     parsed_max = pd.Timestamp("2026-04-30")
@@ -120,7 +112,7 @@ def get_db_metadata():
             pass
             
     conn.close()
-    return table_name, (date_col if date_col else "Invoice Date"), parsed_min, parsed_max
+    return table_name, date_col, parsed_min, parsed_max
 
 table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
 
@@ -167,7 +159,7 @@ def query_targeted_data(part_numbers):
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    part_col = 'PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0])
+    part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
     
     placeholders = ', '.join(['?'] * len(part_numbers))
     query = f"SELECT * FROM [{table_name}] WHERE [{part_col}] IN ({placeholders})"
@@ -175,9 +167,13 @@ def query_targeted_data(part_numbers):
     df = pd.read_sql_query(query, conn, params=part_numbers)
     conn.close()
     
-    if not df.empty and date_col_name in df.columns:
-        # Run mixed dates validation across fetched arrays cleanly
-        df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
+    if not df.empty:
+        # Standardize matching key columns to fallback references cleanly
+        if part_col != 'PartNumber':
+            df.rename(columns={part_col: 'PartNumber'}, inplace=True)
+        if date_col_name in df.columns:
+            df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
+            
     return df
 
 
@@ -186,12 +182,11 @@ def generate_filtered_database(df, start_date, end_date):
     if df.empty:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
-    part_col = 'PartNumber' if 'PartNumber' in df.columns else ('Part Number' if 'Part Number' in df.columns else 'PartNumber')
+    # Map precise structural properties matching internal SQLite schemas
+    part_col = 'PartNumber'
     qty_col = 'qty' if 'qty' in df.columns else ('Quantity' if 'Quantity' in df.columns else 'qty')
-    code_col = 'Product Code' if 'Product Code' in df.columns else ('Part Code' if 'Part Code' in df.columns else 'Product Code')
+    code_col = 'Productcode' if 'Productcode' in df.columns else ('Product Code' if 'Product Code' in df.columns else ('Part Code' if 'Part Code' in df.columns else 'Product Code'))
     desc_col = 'Description'
-
-    if part_col not in df.columns: df.rename(columns={df.columns[0]: part_col}, inplace=True)
 
     max_db_date = df[date_col_name].max() if date_col_name in df.columns else pd.Timestamp(end_date)
     if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
