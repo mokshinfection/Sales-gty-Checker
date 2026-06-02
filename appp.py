@@ -34,6 +34,7 @@ def extract_master_db():
                     os.remove(DB_FILE_PATH)
                 os.rename(db_filename, DB_FILE_PATH)
         
+        # ⚡ SPEED BOOST: Create indexes on the database to make lookups blindingly fast
         conn = sqlite3.connect(DB_FILE_PATH)
         cursor = conn.cursor()
         
@@ -45,7 +46,7 @@ def extract_master_db():
         columns = [col[1] for col in cursor.fetchall()]
         
         part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
-        date_col = next((c for c in columns if c.lower() in ['invoice_date', 'invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
+        date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
         
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
@@ -61,8 +62,9 @@ if not os.path.exists(DB_FILE_PATH):
     with st.spinner("Downloading and indexing master database (Done only once on startup)..."):
         extract_master_db()
 
-# --- 🔄 ADVANCED MULTI-FORMAT DATE PARSER (RESTORED) ---
+# --- 🔄 ADVANCED MULTI-FORMAT DATE PARSER ---
 def safe_parse_mixed_dates(series):
+    """Processes clean string dates and raw numerical Excel serial numbers at the same time."""
     str_series = series.astype(str).str.strip()
     is_numeric = str_series.str.match(r'^\d+(\.\d+)?$')
     parsed_datetimes = pd.Series(pd.NaT, index=series.index, dtype='datetime64[ns]')
@@ -71,13 +73,13 @@ def safe_parse_mixed_dates(series):
         numeric_vals = pd.to_numeric(str_series[is_numeric], errors='coerce')
         parsed_datetimes.loc[is_numeric] = pd.to_datetime(numeric_vals, origin='1899-12-30', unit='D')
         
-    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series.str.lower() != 'nan') & str_series.notna()
+    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series != 'nan') & str_series.notna()
     if non_numeric_mask.any():
         parsed_datetimes.loc[non_numeric_mask] = pd.to_datetime(str_series[non_numeric_mask], dayfirst=True, errors='coerce')
         
     return parsed_datetimes
 
-# --- ⚡ INSTANT METADATA FETCH (RESTORED DYNAMIC SCANNER) ---
+# --- ⚡ INSTANT METADATA FETCH ---
 def get_db_metadata():
     conn = sqlite3.connect(DB_FILE_PATH)
     cursor = conn.cursor()
@@ -88,7 +90,7 @@ def get_db_metadata():
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    date_col = next((c for c in columns if c.lower() in ['invoice_date', 'invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
+    date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
     
     parsed_min = None
     parsed_max = None
@@ -146,13 +148,14 @@ else:
     date_range = st.slider("Select Custom Date Range", min_value=db_min_date.date(), max_value=db_max_date.date(), value=(db_min_date.date(), db_max_date.date()), format="DD/MM/YY")
     start_date, end_date = date_range[0], date_range[1]
 
-# --- 💡 DEEP FUZZY COLUMN MATCHER (RESTORED WITH SCHEMA) ---
+# --- 💡 DEEP FUZZY COLUMN MATCHER ---
 def normalize_columns(df, actual_part_col, actual_date_col):
-    exact_qty = ['qty', 'quantity', 'billed qty', 'invoice qty', 'invoiced qty', 'total qty']
-    exact_code = ['product_code', 'productcode', 'product code', 'part code', 'item code', 'material code', 'group', 'category']
-    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc', 'nomenclature']
-    exact_area = ['area', 'branch', 'location', 'plant', 'site', 'region']
-    exact_rate = ['cost', 'rate', 'unit cost', 'unit_cost', 'price', 'unit price', 'basic price', 'mrp', 'item price', 'net price', 'value', 'amount']
+    exact_qty = ['qty', 'quantity', 'billed qty', 'invoice qty', 'invoiced qty', 'issue qty', 'sold qty', 'total qty']
+    exact_code = ['productcode', 'product code', 'part code', 'item code', 'material code', 'group', 'product group', 'item group', 'category', 'hsn code', 'family', 'hsn']
+    # 💡 FIX: Removed 'name' to prevent conflict with Customer_Name
+    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc', 'part desc', 'nomenclature']
+    exact_area = ['area', 'branch', 'location', 'plant', 'site', 'warehouse', 'region', 'city']
+    exact_rate = ['rate', 'unit cost', 'unit_cost', 'price', 'unit price', 'basic price', 'mrp', 'cost', 'item price', 'net price', 'value', 'basic rate', 'amount']
 
     mapped_targets = set()
     col_map = {}
@@ -182,6 +185,8 @@ def normalize_columns(df, actual_part_col, actual_date_col):
             mapped_targets.add('rate')
 
     df.rename(columns=col_map, inplace=True)
+    
+    # 💡 BULLETPROOF SAFETY NET: Instantly drop any duplicated column names
     df = df.loc[:, ~df.columns.duplicated()].copy()
     
     current_mapped = list(col_map.values())
@@ -208,7 +213,7 @@ def normalize_columns(df, actual_part_col, actual_date_col):
     return df
 
 
-# --- ⚡ TARGETED QUERY ENGINE (RESTORED DYNAMIC TYPES) ---
+# --- ⚡ TARGETED QUERY ENGINE (BULLETPROOF MATCHER) ---
 def query_targeted_data(part_numbers):
     if not part_numbers:
         return pd.DataFrame()
@@ -219,32 +224,27 @@ def query_targeted_data(part_numbers):
     columns = [col[1] for col in cursor.fetchall()]
     
     actual_part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
-    actual_date_col = next((c for c in columns if c.lower() in ['invoice_date', 'invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
+    actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
     
-    # 💡 FIX: Pass native strings, ints, and floats to SQLite so it never drops missing types
     params = []
     for p in part_numbers:
-        p_str = str(p).strip()
-        params.extend([p_str, p_str.upper(), p_str.lower(), f"0{p_str}", f"00{p_str}", p_str.lstrip('0')])
-        try: params.append(int(p_str))
-        except ValueError: pass
-        try: params.append(float(p_str))
-        except ValueError: pass
+        p_str = str(p).strip().upper()
+        params.extend([p_str, f"{p_str}.0"])
             
     placeholders = ', '.join(['?'] * len(params))
     
-    query = f"SELECT * FROM [{table_name}] WHERE [{actual_part_col}] IN ({placeholders})"
+    query = f"""
+        SELECT * FROM [{table_name}] 
+        WHERE UPPER(TRIM(CAST([{actual_part_col}] AS TEXT))) IN ({placeholders})
+    """
     
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     
     if not df.empty:
         df = normalize_columns(df, actual_part_col, actual_date_col)
-        # Standardize matching
         df['PartNumber'] = df['PartNumber'].astype(str).str.strip().str.upper().apply(lambda x: x[:-2] if x.endswith('.0') else x)
         df['InvoiceDate'] = safe_parse_mixed_dates(df['InvoiceDate'])
-        # Clean Area names
-        df['area'] = df['area'].astype(str).str.strip().str.title()
             
     return df
 
@@ -257,6 +257,7 @@ def generate_filtered_database(df, start_date, end_date):
     area_col = 'area'
 
     master_info = df.copy()
+    # Safely compute length without crashing
     master_info['desc_len'] = master_info[desc_col].astype(str).str.len()
     master_info = master_info.sort_values(by=[part_col, 'desc_len']).drop_duplicates(subset=[part_col], keep='last')
     master_info = master_info[[part_col, code_col, desc_col]].copy()
@@ -274,13 +275,7 @@ def generate_filtered_database(df, start_date, end_date):
     qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
     qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
-    # 💡 FIX: Unit Cost Calculation = SUM(Total Cost) / SUM(Qty)
-    df[rate_col] = pd.to_numeric(df[rate_col], errors='coerce').fillna(0.0)
-    df[qty_col] = pd.to_numeric(df[qty_col], errors='coerce').fillna(0)
-    
-    cost_agg = df.groupby(part_col)[[rate_col, qty_col]].sum()
-    cost_agg['Unit Cost'] = (cost_agg[rate_col] / cost_agg[qty_col].replace(0, 1)).round(2)
-    unit_costs = cost_agg[['Unit Cost']].reset_index()
+    unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost')
 
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date) + pd.Timedelta(hours=23, minutes=59, seconds=59)
@@ -369,7 +364,7 @@ edited_input = st.data_editor(
 if not edited_input.empty:
     valid_inputs = edited_input[edited_input["PartNumber"].astype(str).str.strip() != ""].copy()
     if not valid_inputs.empty:
-        valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str).str.strip().str.upper().apply(lambda x: x[:-2] if x.endswith('.0') else x.lstrip('0'))
+        valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str).str.strip().str.upper().apply(lambda x: x[:-2] if x.endswith('.0') else x)
         
         unique_parts = valid_inputs['PartNumber'].unique().tolist()
         raw_targeted_df = query_targeted_data(unique_parts)
@@ -386,12 +381,10 @@ if not edited_input.empty:
 
         result_df['Description'] = result_df['Description'].fillna("Not Found")
         result_df['Product Code'] = result_df.get('Product Code', pd.Series("N/A", index=result_df.index)).fillna("N/A")
-        
-        # Format Costs and apply proper Rounding
-        result_df['Unit Cost'] = result_df['Unit Cost'].fillna(0.0).round(2)
+        result_df['Unit Cost'] = result_df['Unit Cost'].fillna(0.0)
         result_df['Trend'] = result_df['Trend'].fillna("🟡 Moderate Trend")
         result_df['Order Qty'] = result_df['Order Qty'].fillna(0).astype(int)
-        result_df['Total Cost'] = (result_df['Order Qty'] * result_df['Unit Cost']).round(2)
+        result_df['Total Cost'] = result_df['Order Qty'] * result_df['Unit Cost']
         
         all_numeric_cols = areas + [f"{a} Freq" for a in areas] + ['Total Qty', 'Total Freq']
         for col in all_numeric_cols:
