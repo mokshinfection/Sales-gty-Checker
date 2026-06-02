@@ -43,7 +43,6 @@ def extract_master_db():
         tables = cursor.fetchall()
         table_name = tables[0][0] if tables else "sales_records"
         
-        # 💡 FIXED: Wrapped table name in square brackets [ ] to handle spaces/special characters safely
         cursor.execute(f"PRAGMA table_info([{table_name}])")
         columns = [col[1] for col in cursor.fetchall()]
         part_col = 'PartNumber' if 'PartNumber' in columns else 'Part Number'
@@ -73,17 +72,27 @@ def get_db_metadata():
     tables = cursor.fetchall()
     table_name = tables[0][0] if tables else "sales_records"
     
-    # 💡 FIXED: Wrapped table name in square brackets [ ] to resolve the crash
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     date_col = 'Invoice Date' if 'Invoice Date' in columns else 'Date'
     
-    # Fast min/max lookup using our new index
-    cursor.execute(f"SELECT MIN([{date_col}]), MAX([{date_col}]) FROM [{table_name}]")
+    # 💡 FIXED: Filter out NULL values, spaces, and empty strings from the date column calculation
+    query = f"""
+        SELECT MIN([{date_col}]), MAX([{date_col}]) 
+        FROM [{table_name}] 
+        WHERE [{date_col}] IS NOT NULL 
+          AND [{date_col}] != '' 
+          AND TRIM([{date_col}]) != ''
+    """
+    cursor.execute(query)
     min_d, max_d = cursor.fetchone()
     conn.close()
     
-    return table_name, date_col, pd.to_datetime(min_d), pd.to_datetime(max_d)
+    # Fallback to current date if the table contains completely un-parseable dates
+    parsed_min = pd.to_datetime(min_d) if min_d else pd.Timestamp.now() - pd.DateOffset(years=1)
+    parsed_max = pd.to_datetime(max_d) if max_d else pd.Timestamp.now()
+    
+    return table_name, date_col, parsed_min, parsed_max
 
 table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
 
@@ -127,13 +136,11 @@ def query_targeted_data(part_numbers):
         
     conn = sqlite3.connect(DB_FILE_PATH)
     
-    # Get standard table column names dynamically
     cursor = conn.cursor()
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     part_col = 'PartNumber' if 'PartNumber' in columns else 'Part Number'
     
-    # Safely inject part numbers into localized parameterized SQL query
     placeholders = ', '.join(['?'] * len(part_numbers))
     query = f"SELECT * FROM [{table_name}] WHERE [{part_col}] IN ({placeholders})"
     
@@ -150,7 +157,6 @@ def generate_filtered_database(df, start_date, end_date):
     if df.empty:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
-    # Trend Anchor limits
     max_db_date = df[date_col_name].max()
     if pd.isnull(max_db_date): max_db_date = pd.Timestamp.now()
         
@@ -172,13 +178,11 @@ def generate_filtered_database(df, start_date, end_date):
     rate_col = 'Rate' if 'Rate' in df.columns else ('Unit Cost' if 'Unit Cost' in df.columns else None)
     unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=[part_col, 'Unit Cost'])
 
-    # Filter by user selected date slider window
     mask = (df[date_col_name].dt.date >= start_date) & (df[date_col_name].dt.date <= end_date)
     filtered_df = df[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
-    # Ensure columns exist before pivoting
     for col in [part_col, code_col, desc_col]:
         if col not in filtered_df.columns: filtered_df[col] = "N/A"
     if 'Area' not in filtered_df.columns: filtered_df['Area'] = "Unknown"
@@ -256,11 +260,9 @@ if not edited_input.empty:
     if not valid_inputs.empty:
         valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str).str.strip()
         
-        # ⚡ FETCH ONLY TARGET PARTS FROM SQLITE INDEX
         unique_parts = valid_inputs['PartNumber'].unique().tolist()
         raw_targeted_df = query_targeted_data(unique_parts)
         
-        # Process database aggregations only for searched entries
         database, areas = generate_filtered_database(raw_targeted_df, start_date, end_date)
         
         if not database.empty:
