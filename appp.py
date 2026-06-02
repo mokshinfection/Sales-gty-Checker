@@ -5,7 +5,7 @@ import io
 import sqlite3
 import os
 import urllib.request
-# Make sure to add 'py7zr' to your requirements.txt
+# Make sure 'py7zr' is in your requirements.txt
 import py7zr
 
 # --- PAGE CONFIGURATION ---
@@ -25,7 +25,9 @@ def extract_and_init_sqlite():
             
         # Extract the CSV contents completely in-memory
         with py7zr.SevenZipFile(io.BytesIO(archive_bytes), mode='r') as archive:
-            extracted_data = archive.getallnames()
+            # 🔄 FIXED: Changed getallnames() to getnames()
+            extracted_data = archive.getnames()
+            
             # Find the first target CSV inside the archive
             csv_filename = next((name for name in extracted_data if name.endswith('.csv')), None)
             if not csv_filename:
