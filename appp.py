@@ -16,71 +16,72 @@ st.title("Sales Quantity Checker")
 GITHUB_7Z_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/sales.7z"
 DB_FILE_PATH = "Sales.db"
 
-def extract_and_init_sqlite():
-    """Downloads sales.7z, extracts it locally, and seeds the SQLite backend safely."""
+def extract_master_db():
+    """Downloads sales.7z and extracts the internal .db file directly into the workspace."""
     try:
         # Download the compressed .7z archive from GitHub
         with urllib.request.urlopen(GITHUB_7Z_URL) as response:
             archive_bytes = response.read()
             
-        # Extract the archive onto the local server instance path directly
+        # Extract the archive contents directly to the current working path
         with py7zr.SevenZipFile(io.BytesIO(archive_bytes), mode='r') as archive:
-            extracted_data = archive.getnames()
+            extracted_files = archive.getnames()
             
-            # Identify the target CSV name inside the archive structure
-            csv_filename = next((name for name in extracted_data if name.endswith('.csv')), None)
-            if not csv_filename:
-                raise FileNotFoundError("Could not locate a valid .csv file inside the downloaded sales.7z archive.")
+            # Find the actual database filename inside the archive
+            db_filename = next((name for name in extracted_files if name.endswith('.db')), None)
+            if not db_filename:
+                raise FileNotFoundError("Could not locate a valid .db file inside the downloaded sales.7z archive.")
             
-            # Extract everything cleanly to the local workspace directory
+            # Extract the database file locally
             archive.extractall(path=".")
-
-        # Read the newly extracted local CSV file via Pandas
-        df = pd.read_csv(csv_filename, low_memory=False, on_bad_lines='skip')
-        df.columns = df.columns.str.strip()
-        
-        # Cleanup the temporary extracted CSV file to save server storage
-        if os.path.exists(csv_filename):
-            os.remove(csv_filename)
-        
-        date_col = 'Invoice Date' if 'Invoice Date' in df.columns else 'Date'
-        if date_col not in df.columns:
-            raise KeyError(f"Could not locate date index. Evaluated columns: {', '.join(df.columns)}")
             
-        df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
-        df = df.dropna(subset=[date_col])
-        
-        # Seed into local embedded SQLite memory space
-        conn = sqlite3.connect(DB_FILE_PATH)
-        df_to_save = df.copy()
-        df_to_save[date_col] = df_to_save[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
-        df_to_save.to_sql("sales_records", conn, if_exists='replace', index=False)
-        conn.commit()
-        conn.close()
-        
+            # If the file inside was named something else, rename it to match our internal working path
+            if db_filename != DB_FILE_PATH and os.path.exists(db_filename):
+                if os.path.exists(DB_FILE_PATH):
+                    os.remove(DB_FILE_PATH)
+                os.rename(db_filename, DB_FILE_PATH)
+                
     except Exception as e:
-        st.error(f"Failed to bootstrap database from source raw repository architecture.\n\nError: {e}")
+        st.error(f"Failed to extract master database architecture from GitHub.\n\nError: {e}")
         st.stop()
 
 # --- DATA PROCESSING (CACHED FROM SQLITE) ---
 @st.cache_data(ttl=3600)
 def load_backend_data_from_sqlite():
-    """Loads records directly out of the local SQLite storage layer."""
+    """Loads records directly out of the extracted master database file."""
     if not os.path.exists(DB_FILE_PATH):
-        with st.spinner("Downloading and processing absolute master archive from GitHub..."):
-            extract_and_init_sqlite()
+        with st.spinner("Downloading and unpacking absolute master database from GitHub..."):
+            extract_master_db()
 
     conn = sqlite3.connect(DB_FILE_PATH)
-    df = pd.read_sql_query("SELECT * FROM sales_records", conn)
-    conn.close()
+    # Automatically scan for table name inside the provided .db file
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        table_name = tables[0][0] if tables else "sales_records"
+        
+        df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
+    except Exception as table_error:
+        st.error(f"Error reading tables from extracted database: {table_error}")
+        st.stop()
+    finally:
+        conn.close()
     
-    date_col = 'Invoice Date' if 'Invoice Date' in df.columns else 'Date'
+    # Standardize expected target date column parsing
+    date_col = 'Invoice Date' if 'Invoice Date' in df.columns else ('Date' if 'Date' in df.columns else None)
+    if not date_col:
+        raise KeyError(f"Could not locate a valid date column. Found: {', '.join(df.columns)}")
+        
     df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
     return df, date_col
 
 def generate_filtered_database(df, date_col, start_date, end_date):
     """Slices historical sets and applies performance and structural trends."""
     max_db_date = df[date_col].max()
+    if pd.isnull(max_db_date):
+        max_db_date = pd.Timestamp.now()
+        
     three_months_ago = (max_db_date - pd.DateOffset(months=3)).date()
     twelve_months_ago = (max_db_date - pd.DateOffset(months=12)).date()
     max_date_conv = max_db_date.date()
@@ -107,6 +108,15 @@ def generate_filtered_database(df, date_col, start_date, end_date):
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
+    # Normalize pivot availability checks dynamically
+    for col in [part_col, code_col, desc_col]:
+        if col not in filtered_df.columns:
+            filtered_df[col] = "N/A"
+    if 'Area' not in filtered_df.columns:
+        filtered_df['Area'] = "Unknown"
+    if qty_col not in filtered_df.columns:
+        filtered_df[qty_col] = 0
+
     pivot_qty = filtered_df.pivot_table(
         index=[part_col, code_col, desc_col], columns='Area', values=qty_col, aggfunc='sum', fill_value=0
     ).reset_index()
@@ -170,7 +180,7 @@ with st.sidebar:
         db_min_date = raw_data[date_col_name].min().date()
         db_max_date = raw_data[date_col_name].max().date()
             
-        st.success("Master Repository Active")
+        st.success("Master SQL Database Active")
         st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
         
         if st.button("Force Synchronize with GitHub"):
@@ -179,7 +189,7 @@ with st.sidebar:
                 os.remove(DB_FILE_PATH)
             st.rerun()
     except Exception as e:
-        st.error(f"Failed to resolve data frame parameters: {e}")
+        st.error(f"Failed to load Master database parameters: {e}")
         st.stop()
 
 
