@@ -97,14 +97,13 @@ with st.sidebar:
     st.header("Update Master Database")
     st.write("Upload your new data files to merge them with the base file.")
     
-    # 🔄 CHANGED: added accept_multiple_files=True
+    # 🔄 MULTI-FILE LOADING ENABLED HERE
     monthly_files = st.file_uploader("Upload New Month Data Files", type=["csv", "xlsx"], accept_multiple_files=True)
     
     if monthly_files:
         try:
             new_dataframes = []
             for file in monthly_files:
-                # Read each file appropriately based on extension
                 if file.name.endswith('.csv'):
                     df_temp = pd.read_csv(file, low_memory=False)
                 else:
@@ -114,15 +113,12 @@ with st.sidebar:
                 new_dataframes.append(df_temp)
                 
             with st.spinner("Merging all files with Master Database..."):
-                # Fetch base master file
                 raw_base_df = pd.read_csv(GITHUB_CSV_URL, compression='zip', low_memory=False, on_bad_lines='skip')
                 raw_base_df.columns = raw_base_df.columns.str.strip()
                 
-                # Combine the original dataframe with all the newly uploaded dataframes
                 all_dfs = [raw_base_df] + new_dataframes
                 updated_master_df = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
                 
-                # Compress into a new zip file
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                     zip_file.writestr("Sales.csv", updated_master_df.to_csv(index=False)) 
@@ -190,7 +186,6 @@ if not edited_input.empty:
         
         st.write("### Final Sales Report")
         
-        # --- THE BLUE BANNER IS NOW HERE ---
         st.info(f"**Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %b %Y')}** to **{end_date.strftime('%d %B %Y')}**")
         
         view_mode = st.radio(
@@ -205,7 +200,8 @@ if not edited_input.empty:
                 display_df[area] = "Qty: " + result_df[area].astype(str) + " | Freq: " + result_df[f"{area} Freq"].astype(str)
             display_df['Total'] = "Qty: " + result_df['Total Qty'].astype(str) + " | Freq: " + result_df['Total Freq'].astype(str)
             
-            st.dataframe(display_df, use_container_width=True)
+            # 💡 UPDATED: use_container_width=True changed to width='stretch' to match your logs' warning
+            st.dataframe(display_df, width="stretch")
             
         else:
             display_cols = ['PartNumber', 'Product Code', 'Description']
@@ -215,7 +211,6 @@ if not edited_input.empty:
             
             detailed_df = result_df[[c for c in display_cols if c in result_df.columns]]
             
-            # --- PANDAS STYLER: APPLYING COLORS ---
             def color_columns(col):
                 if "Freq" in col.name:
                     return ['background-color: rgba(41, 128, 185, 0.15); color: #2980B9; font-weight: bold'] * len(col)
@@ -224,13 +219,12 @@ if not edited_input.empty:
                 else:
                     return [''] * len(col)
 
-            # Apply the style to the dataframe
             styled_df = detailed_df.style.apply(color_columns, axis=0)
             
-            # Render the styled dataframe
-            st.dataframe(styled_df, use_container_width=True)
+            # 💡 UPDATED: use_container_width=True changed to width='stretch'
+            st.dataframe(styled_df, width="stretch")
         
-        # --- EXCEL DOWNLOAD (Raw Numbers) ---
+        # --- EXCEL DOWNLOAD ---
         export_cols = ['PartNumber', 'Product Code', 'Description']
         for area in areas:
             export_cols.extend([area, f"{area} Freq"])
