@@ -45,8 +45,9 @@ def extract_master_db():
         cursor.execute(f"PRAGMA table_info([{table_name}])")
         columns = [col[1] for col in cursor.fetchall()]
         
-        part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
-        date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
+        # Find column variants case-insensitively
+        part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number']), columns[0])
+        date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date']), columns[0])
         
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
@@ -91,7 +92,7 @@ def get_db_metadata():
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
+    date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date']), columns[0])
     
     parsed_min = None
     parsed_max = None
@@ -163,63 +164,75 @@ def query_targeted_data(part_numbers):
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
+    # Identify key tracking headers case-insensitively 
+    actual_part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number']), columns[0])
+    actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date']), columns[0])
     
     placeholders = ', '.join(['?'] * len(part_numbers))
-    query = f"SELECT * FROM [{table_name}] WHERE [{part_col}] IN ({placeholders})"
+    query = f"SELECT * FROM [{table_name}] WHERE [{actual_part_col}] IN ({placeholders})"
     
     df = pd.read_sql_query(query, conn, params=part_numbers)
     conn.close()
     
     if not df.empty:
-        # 💡 FIX: Standardize all columns to lower-case first to match variations instantly
-        df.columns = df.columns.str.lower()
+        # Normalize the column names to guarantee structure downstream
+        rename_map = {}
+        for col in df.columns:
+            if col.lower() == actual_part_col.lower():
+                rename_map[col] = 'PartNumber'
+            elif col.lower() == actual_date_col.lower():
+                rename_map[col] = 'InvoiceDate'
+            elif col.lower() == 'qty':
+                rename_map[col] = 'qty'
+            elif col.lower() in ['productcode', 'product code']:
+                rename_map[col] = 'Productcode'
+            elif col.lower() == 'description':
+                rename_map[col] = 'description'
+            elif col.lower() == 'area':
+                rename_map[col] = 'area'
+            elif col.lower() in ['rate', 'unit cost', 'unit_cost']:
+                rename_map[col] = 'rate'
+                
+        df.rename(columns=rename_map, inplace=True)
         
-        # Force exact mapping names back to standard structural properties
-        df.rename(columns={
-            part_col.lower(): 'PartNumber',
-            date_col_name.lower(): date_col_name
-        }, inplace=True)
-        
-        # Safely convert the date values to datetime objects
-        df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
+        # 💡 GUARANTEED CONVERSION: Structural execution completely rules out invalid string types
+        df['InvoiceDate'] = safe_parse_mixed_dates(df['InvoiceDate'])
             
     return df
 
 
 def generate_filtered_database(df, start_date, end_date):
     """Processes trends and layouts ONLY for the targeted matches."""
-    if df.empty or date_col_name not in df.columns:
+    # Ensure our structural date index exists cleanly in the workspace
+    if df.empty or 'InvoiceDate' not in df.columns:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
     part_col = 'PartNumber'
-    qty_col = 'qty' if 'qty' in df.columns else ('quantity' if 'quantity' in df.columns else 'qty')
-    code_col = 'productcode' if 'productcode' in df.columns else ('product code' if 'product code' in df.columns else 'productcode')
-    desc_col = 'description'
+    qty_col = 'qty' if 'qty' in df.columns else 'qty'
+    code_col = 'Productcode' if 'Productcode' in df.columns else 'Productcode'
+    desc_col = 'description' if 'description' in df.columns else 'description'
 
-    max_db_date = df[date_col_name].max()
+    max_db_date = df['InvoiceDate'].max()
     if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
         
     three_months_ago = (max_db_date - pd.DateOffset(months=3)).date()
     twelve_months_ago = (max_db_date - pd.DateOffset(months=12)).date()
     max_date_conv = max_db_date.date()
 
-    mask_3m = (df[date_col_name].dt.date >= three_months_ago) & (df[date_col_name].dt.date <= max_date_conv)
-    mask_12m = (df[date_col_name].dt.date >= twelve_months_ago) & (df[date_col_name].dt.date <= max_date_conv)
+    mask_3m = (df['InvoiceDate'].dt.date >= three_months_ago) & (df['InvoiceDate'].dt.date <= max_date_conv)
+    mask_12m = (df['InvoiceDate'].dt.date >= twelve_months_ago) & (df['InvoiceDate'].dt.date <= max_date_conv)
     
     qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
     qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
-    rate_col = 'rate' if 'rate' in df.columns else ('unit cost' if 'unit cost' in df.columns else ('unit_cost' if 'unit_cost' in df.columns else None))
+    rate_col = 'rate' if 'rate' in df.columns else None
     unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=[part_col, 'Unit Cost'])
 
-    mask = (df[date_col_name].dt.date >= start_date) & (df[date_col_name].dt.date <= end_date)
+    mask = (df['InvoiceDate'].dt.date >= start_date) & (df['InvoiceDate'].dt.date <= end_date)
     filtered_df = df[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
-    
-    # 💡 FIX: Keep things lower-case to easily match internal database values
-    area_col = 'area' if 'area' in filtered_df.columns else 'Area'
+    area_col = 'area' if 'area' in filtered_df.columns else 'area'
     
     for col in [part_col, code_col, desc_col]:
         if col not in filtered_df.columns: filtered_df[col] = "N/A"
@@ -229,13 +242,10 @@ def generate_filtered_database(df, start_date, end_date):
     pivot_qty = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns=area_col, values=qty_col, aggfunc='sum', fill_value=0).reset_index()
     pivot_freq = filtered_df.pivot_table(index=[part_col, code_col, desc_col], columns=area_col, values=qty_col, aggfunc='count', fill_value=0).reset_index()
     
-    # Capitalize display columns for the final report layout
     pivot_qty.rename(columns={part_col: 'PartNumber', code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
     pivot_freq.rename(columns={part_col: 'PartNumber', code_col: 'Product Code', desc_col: 'Description'}, inplace=True)
     
-    # Fix casing for target areas
     for area in target_areas:
-        # Match case-insensitively
         matched_col = next((c for c in pivot_qty.columns if c.lower() == area.lower()), None)
         if matched_col and matched_col != area:
             pivot_qty.rename(columns={matched_col: area}, inplace=True)
