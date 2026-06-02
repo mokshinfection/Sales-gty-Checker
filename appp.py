@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
+import zipfile
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Sales Quantity Checker", layout="wide")
@@ -94,29 +95,43 @@ with st.sidebar:
         
     st.divider()
     st.header("Update Master Database")
-    st.write("Upload your new monthly data to merge it with the base file.")
-    monthly_file = st.file_uploader("Upload New Month Data", type=["csv", "xlsx"])
-    if monthly_file:
+    st.write("Upload your new data files to merge them with the base file.")
+    
+    # 🔄 CHANGED: added accept_multiple_files=True
+    monthly_files = st.file_uploader("Upload New Month Data Files", type=["csv", "xlsx"], accept_multiple_files=True)
+    
+    if monthly_files:
         try:
-            new_df = pd.read_csv(monthly_file, low_memory=False) if monthly_file.name.endswith('.csv') else pd.read_excel(monthly_file)
-            new_df.columns = new_df.columns.str.strip() 
-            with st.spinner("Merging with Master Database..."):
+            new_dataframes = []
+            for file in monthly_files:
+                # Read each file appropriately based on extension
+                if file.name.endswith('.csv'):
+                    df_temp = pd.read_csv(file, low_memory=False)
+                else:
+                    df_temp = pd.read_excel(file)
+                
+                df_temp.columns = df_temp.columns.str.strip()
+                new_dataframes.append(df_temp)
+                
+            with st.spinner("Merging all files with Master Database..."):
+                # Fetch base master file
                 raw_base_df = pd.read_csv(GITHUB_CSV_URL, compression='zip', low_memory=False, on_bad_lines='skip')
                 raw_base_df.columns = raw_base_df.columns.str.strip()
-                updated_master_df = pd.concat([raw_base_df, new_df], ignore_index=True).drop_duplicates()
                 
-                import zipfile
+                # Combine the original dataframe with all the newly uploaded dataframes
+                all_dfs = [raw_base_df] + new_dataframes
+                updated_master_df = pd.concat(all_dfs, ignore_index=True).drop_duplicates()
+                
+                # Compress into a new zip file
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                     zip_file.writestr("Sales.csv", updated_master_df.to_csv(index=False)) 
                     
-                st.success(f"Merged! Size: {len(updated_master_df)} rows.")
+                st.success(f"Successfully Merged {len(monthly_files)} file(s)! Total Size: {len(updated_master_df)} rows.")
                 st.download_button("Download New Master File (.zip)", data=zip_buffer.getvalue(), file_name="Sales.zip", mime="application/zip")
         except Exception as e:
             st.error(f"Error merging files: {e}")
 
-
-# --- DATE FILTERING UI ---
 
 # --- DATE FILTERING UI ---
 st.write("### Set Timeframe")
@@ -135,8 +150,6 @@ elif time_preset == "Last 12 Months":
 else:
     date_range = st.slider("Select Custom Date Range", min_value=db_min_date, max_value=db_max_date, value=(db_min_date, db_max_date), format="DD/MM/YY")
     start_date, end_date = date_range[0], date_range[1]
-
-# (The blue banner was removed from here)
 
 database, areas = generate_filtered_database(raw_data, date_col_name, start_date, end_date)
 
@@ -178,7 +191,7 @@ if not edited_input.empty:
         st.write("### Final Sales Report")
         
         # --- THE BLUE BANNER IS NOW HERE ---
-        st.info(f"**Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %B %Y')}** to **{end_date.strftime('%d %B %Y')}**")
+        st.info(f"**Data Range Selected:** Quantities and Frequencies below represent sales from **{start_date.strftime('%d %b %Y')}** to **{end_date.strftime('%d %B %Y')}**")
         
         view_mode = st.radio(
             "Select Display Format:", 
@@ -205,10 +218,8 @@ if not edited_input.empty:
             # --- PANDAS STYLER: APPLYING COLORS ---
             def color_columns(col):
                 if "Freq" in col.name:
-                    # Light blue background, bold blue text for Frequency
                     return ['background-color: rgba(41, 128, 185, 0.15); color: #2980B9; font-weight: bold'] * len(col)
                 elif col.name in areas or col.name == "Total Qty":
-                    # Light green background, bold green text for Quantity
                     return ['background-color: rgba(39, 174, 96, 0.15); color: #27AE60; font-weight: bold'] * len(col)
                 else:
                     return [''] * len(col)
@@ -232,4 +243,3 @@ if not edited_input.empty:
             file_name=f"VECV_Report_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
