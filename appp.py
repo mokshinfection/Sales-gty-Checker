@@ -46,10 +46,7 @@ def extract_master_db():
         cursor.execute(f"PRAGMA table_info([{table_name}])")
         columns = [col[1] for col in cursor.fetchall()]
         
-        # Dynamic search for Part column variations
         part_col = 'PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0])
-        
-        # Dynamic search for Date column variations
         date_col = 'Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else None)
         if not date_col:
             date_col = next((col for col in columns if 'date' in col.lower()), columns[0])
@@ -69,9 +66,9 @@ if not os.path.exists(DB_FILE_PATH):
     with st.spinner("Downloading and indexing master database (Done only once on startup)..."):
         extract_master_db()
 
-# --- ⚡ INSTANT METADATA FETCH (NO HEAVY LOADING) ---
+# --- ⚡ INSTANT METADATA FETCH (CHRONOLOGICALLY CORRECT) ---
 def get_db_metadata():
-    """Fetches min/max dates and table name safely without loading data into memory."""
+    """Fetches correct chronological dates by bypassing SQLite text sort limitations."""
     conn = sqlite3.connect(DB_FILE_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -81,35 +78,28 @@ def get_db_metadata():
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
     
-    # 💡 FIXED: Flexible date column detection strategy to prevent "no such column" error
     date_col = 'Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else None)
     if not date_col:
         date_col = next((col for col in columns if 'date' in col.lower()), None)
     
-    # Absolute fallbacks if no date column can be matched or resolved
+    # Absolute default dates if everything else fails
     parsed_min = pd.Timestamp("2025-05-02")
     parsed_max = pd.Timestamp("2026-04-30")
     
     if date_col:
         try:
-            query = f"""
-                SELECT MIN([{date_col}]), MAX([{date_col}]) 
-                FROM [{table_name}] 
-                WHERE [{date_col}] IS NOT NULL 
-                  AND [{date_col}] != '' 
-                  AND TRIM([{date_col}]) != ''
-            """
-            cursor.execute(query)
-            min_d, max_d = cursor.fetchone()
+            # 💡 FIX: Fetch all unique date strings instead of using SQLite's broken text MIN/MAX
+            query = f"SELECT DISTINCT [{date_col}] FROM [{table_name}] WHERE [{date_col}] IS NOT NULL AND [{date_col}] != ''"
+            unique_dates_df = pd.read_sql_query(query, conn)
             
-            if min_d: 
-                t_min = pd.to_datetime(min_d, dayfirst=True, errors='coerce')
-                if not pd.isnull(t_min): parsed_min = t_min
-            if max_d: 
-                t_max = pd.to_datetime(max_d, dayfirst=True, errors='coerce')
-                if not pd.isnull(t_max): parsed_max = t_max
+            if not unique_dates_df.empty:
+                # Force correct chronological conversion inside Pandas
+                converted_dates = pd.to_datetime(unique_dates_df[date_col], dayfirst=True, errors='coerce').dropna()
+                if not converted_dates.empty:
+                    parsed_min = converted_dates.min()
+                    parsed_max = converted_dates.max()
         except Exception:
-            pass # Use hardcoded fallback bounds if calculation encounters issues
+            pass
             
     conn.close()
     return table_name, (date_col if date_col else "Invoice Date"), parsed_min, parsed_max
@@ -121,6 +111,7 @@ table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
 with st.sidebar:
     st.header("System Status")
     st.success("Master SQL Database Active (Indexed)")
+    # 🔄 This message will now accurately show Apr/May 2025 to Apr 2026
     st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
     
     if st.button("Force Synchronize with GitHub"):
@@ -141,6 +132,7 @@ elif time_preset == "Last 6 Months":
     start_date = (db_max_date - pd.DateOffset(months=6)).date()
     end_date = db_max_date.date()
 elif time_preset == "Last 12 Months":
+    # 💡 The 'Last 12 Months' preset filter will now pull all your 2025 data correctly!
     start_date = (db_max_date - pd.DateOffset(months=12)).date()
     end_date = db_max_date.date()
 else:
@@ -169,6 +161,7 @@ def query_targeted_data(part_numbers):
     conn.close()
     
     if not df.empty and date_col_name in df.columns:
+        # Force strict dayfirst parsing to avoid mixing up days and months
         df[date_col_name] = pd.to_datetime(df[date_col_name], dayfirst=True, errors='coerce')
     return df
 
@@ -183,7 +176,6 @@ def generate_filtered_database(df, start_date, end_date):
     code_col = 'Product Code' if 'Product Code' in df.columns else ('Part Code' if 'Part Code' in df.columns else 'Product Code')
     desc_col = 'Description'
 
-    # Verify key structural items are assigned names
     if part_col not in df.columns: df.rename(columns={df.columns[0]: part_col}, inplace=True)
 
     max_db_date = df[date_col_name].max() if date_col_name in df.columns else pd.Timestamp(end_date)
