@@ -87,12 +87,15 @@ def get_db_metadata():
     min_d, max_d = cursor.fetchone()
     conn.close()
     
-    # 💡 FIXED: Explicitly force cast to pandas datetime using specific formatting rules
-    parsed_min = pd.to_datetime(min_d, errors='coerce') if min_d else pd.Timestamp.now() - pd.DateOffset(years=1)
-    parsed_max = pd.to_datetime(max_d, errors='coerce') if max_d else pd.Timestamp.now()
+    # 💡 FIXED: Flexible parsing strategy to handle multiple string/date formats smoothly
+    parsed_min = pd.to_datetime(min_d, dayfirst=True, errors='coerce') if min_d else pd.NaT
+    parsed_max = pd.to_datetime(max_d, dayfirst=True, errors='coerce') if max_d else pd.NaT
     
-    if pd.isnull(parsed_min): parsed_min = pd.Timestamp.now() - pd.DateOffset(years=1)
-    if pd.isnull(parsed_max): parsed_max = pd.Timestamp.now()
+    # Fallback bounds if standard date parsing results in a null value (NaT)
+    if pd.isnull(parsed_min): 
+        parsed_min = pd.Timestamp("2025-05-02")
+    if pd.isnull(parsed_max): 
+        parsed_max = pd.Timestamp("2026-04-30")
     
     return table_name, date_col, parsed_min, parsed_max
 
@@ -150,7 +153,7 @@ def query_targeted_data(part_numbers):
     conn.close()
     
     if not df.empty:
-        df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
+        df[date_col_name] = pd.to_datetime(df[date_col_name], dayfirst=True, errors='coerce')
     return df
 
 
