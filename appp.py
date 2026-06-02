@@ -152,22 +152,42 @@ else:
 def normalize_columns(df, actual_part_col, actual_date_col):
     exact_qty = ['qty', 'quantity', 'billed qty', 'invoice qty', 'invoiced qty', 'issue qty', 'sold qty', 'total qty']
     exact_code = ['productcode', 'product code', 'part code', 'item code', 'material code', 'group', 'product group', 'item group', 'category', 'hsn code', 'family', 'hsn']
-    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc', 'part desc', 'nomenclature', 'name']
+    # 💡 FIX: Removed 'name' to prevent conflict with Customer_Name
+    exact_desc = ['description', 'item description', 'part description', 'material description', 'desc', 'part desc', 'nomenclature']
     exact_area = ['area', 'branch', 'location', 'plant', 'site', 'warehouse', 'region', 'city']
     exact_rate = ['rate', 'unit cost', 'unit_cost', 'price', 'unit price', 'basic price', 'mrp', 'cost', 'item price', 'net price', 'value', 'basic rate', 'amount']
 
+    mapped_targets = set()
     col_map = {}
+    
     for col in df.columns:
         l_col = col.lower().strip()
-        if l_col == actual_part_col.lower(): col_map[col] = 'PartNumber'
-        elif l_col == actual_date_col.lower(): col_map[col] = 'InvoiceDate'
-        elif l_col in exact_qty: col_map[col] = 'qty'
-        elif l_col in exact_code: col_map[col] = 'Productcode'
-        elif l_col in exact_desc: col_map[col] = 'description'
-        elif l_col in exact_area: col_map[col] = 'area'
-        elif l_col in exact_rate: col_map[col] = 'rate'
+        if l_col == actual_part_col.lower() and 'PartNumber' not in mapped_targets: 
+            col_map[col] = 'PartNumber'
+            mapped_targets.add('PartNumber')
+        elif l_col == actual_date_col.lower() and 'InvoiceDate' not in mapped_targets: 
+            col_map[col] = 'InvoiceDate'
+            mapped_targets.add('InvoiceDate')
+        elif l_col in exact_qty and 'qty' not in mapped_targets: 
+            col_map[col] = 'qty'
+            mapped_targets.add('qty')
+        elif l_col in exact_code and 'Productcode' not in mapped_targets: 
+            col_map[col] = 'Productcode'
+            mapped_targets.add('Productcode')
+        elif l_col in exact_desc and 'description' not in mapped_targets: 
+            col_map[col] = 'description'
+            mapped_targets.add('description')
+        elif l_col in exact_area and 'area' not in mapped_targets: 
+            col_map[col] = 'area'
+            mapped_targets.add('area')
+        elif l_col in exact_rate and 'rate' not in mapped_targets: 
+            col_map[col] = 'rate'
+            mapped_targets.add('rate')
 
     df.rename(columns=col_map, inplace=True)
+    
+    # 💡 BULLETPROOF SAFETY NET: Instantly drop any duplicated column names
+    df = df.loc[:, ~df.columns.duplicated()].copy()
     
     current_mapped = list(col_map.values())
     fuzzy_map = {}
@@ -182,6 +202,7 @@ def normalize_columns(df, actual_part_col, actual_date_col):
         elif 'rate' not in current_mapped and 'rate' not in fuzzy_map.values() and ('price' in l_col or 'cost' in l_col or 'rate' in l_col): fuzzy_map[col] = 'rate'
             
     df.rename(columns=fuzzy_map, inplace=True)
+    df = df.loc[:, ~df.columns.duplicated()].copy()
     
     for req_col in ['PartNumber', 'InvoiceDate', 'qty', 'Productcode', 'description', 'area', 'rate']:
         if req_col not in df.columns:
@@ -205,7 +226,6 @@ def query_targeted_data(part_numbers):
     actual_part_col = next((c for c in columns if c.lower() in ['partnumber', 'part number', 'material']), columns[0])
     actual_date_col = next((c for c in columns if c.lower() in ['invoicedate', 'invoice date', 'date', 'posting date']), columns[0])
     
-    # 💡 GUARANTEED MATCH PARAMS: Pass standard, .0 decimal, and strict uppercase forms
     params = []
     for p in part_numbers:
         p_str = str(p).strip().upper()
@@ -213,7 +233,6 @@ def query_targeted_data(part_numbers):
             
     placeholders = ', '.join(['?'] * len(params))
     
-    # 💡 BULLETPROOF SQL: Forces SQLite to strip all hidden spaces and cast to text BEFORE matching
     query = f"""
         SELECT * FROM [{table_name}] 
         WHERE UPPER(TRIM(CAST([{actual_part_col}] AS TEXT))) IN ({placeholders})
@@ -224,7 +243,6 @@ def query_targeted_data(part_numbers):
     
     if not df.empty:
         df = normalize_columns(df, actual_part_col, actual_date_col)
-        # 💡 GUARANTEED CLEANUP: Force output format to match input format exactly
         df['PartNumber'] = df['PartNumber'].astype(str).str.strip().str.upper().apply(lambda x: x[:-2] if x.endswith('.0') else x)
         df['InvoiceDate'] = safe_parse_mixed_dates(df['InvoiceDate'])
             
@@ -238,8 +256,8 @@ def generate_filtered_database(df, start_date, end_date):
     rate_col = 'rate'
     area_col = 'area'
 
-    # Safely extract master info, prioritizing rows that actually have descriptions
     master_info = df.copy()
+    # Safely compute length without crashing
     master_info['desc_len'] = master_info[desc_col].astype(str).str.len()
     master_info = master_info.sort_values(by=[part_col, 'desc_len']).drop_duplicates(subset=[part_col], keep='last')
     master_info = master_info[[part_col, code_col, desc_col]].copy()
@@ -346,7 +364,6 @@ edited_input = st.data_editor(
 if not edited_input.empty:
     valid_inputs = edited_input[edited_input["PartNumber"].astype(str).str.strip() != ""].copy()
     if not valid_inputs.empty:
-        # 💡 GUARANTEED CLEANUP: Streamlit input is matched perfectly to the cleaned DB strings
         valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str).str.strip().str.upper().apply(lambda x: x[:-2] if x.endswith('.0') else x)
         
         unique_parts = valid_inputs['PartNumber'].unique().tolist()
