@@ -38,7 +38,6 @@ def extract_master_db():
         conn = sqlite3.connect(DB_FILE_PATH)
         cursor = conn.cursor()
         
-        # Auto-detect table name
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = cursor.fetchall()
         table_name = tables[0][0] if tables else "sales_records"
@@ -51,7 +50,6 @@ def extract_master_db():
         if not date_col:
             date_col = next((col for col in columns if 'date' in col.lower()), columns[0])
         
-        # Apply Indexes
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_part ON [{table_name}] ([{part_col}]);")
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_date ON [{table_name}] ([{date_col}]);")
         conn.commit()
@@ -66,9 +64,32 @@ if not os.path.exists(DB_FILE_PATH):
     with st.spinner("Downloading and indexing master database (Done only once on startup)..."):
         extract_master_db()
 
-# --- ⚡ INSTANT METADATA FETCH (CHRONOLOGICALLY CORRECT) ---
+# --- 🔄 ADVANCED MULTI-FORMAT DATE PARSER ---
+def safe_parse_mixed_dates(series):
+    """Processes clean string dates and raw numerical Excel serial numbers at the same time."""
+    # Convert series elements to stripped strings safely
+    str_series = series.astype(str).str.strip()
+    
+    # Check if a row is numeric (Excel timestamps like 46022)
+    is_numeric = str_series.str.match(r'^\d+(\.\d+)?$')
+    
+    parsed_datetimes = pd.Series(pd.NaT, index=series.index)
+    
+    # 1. Parse Excel Serial Numbers
+    if is_numeric.any():
+        numeric_vals = pd.to_numeric(str_series[is_numeric], errors='coerce')
+        parsed_datetimes[is_numeric] = pd.to_datetime(numeric_vals, origin='1899-12-30', unit='D')
+        
+    # 2. Parse Standard String Date Text (DD-MM-YYYY / DD/MM/YYYY)
+    non_numeric_mask = ~is_numeric & (str_series != '') & (str_series != 'nan')
+    if non_numeric_mask.any():
+        parsed_datetimes[non_numeric_mask] = pd.to_datetime(str_series[non_numeric_mask], dayfirst=True, errors='coerce')
+        
+    return parsed_datetimes
+
+# --- ⚡ INSTANT METADATA FETCH (CHRONOLOGICALLY RECONSTRUCTED) ---
 def get_db_metadata():
-    """Fetches correct chronological dates by bypassing SQLite text sort limitations."""
+    """Fetches unique database strings and uses our parser to resolve true min/max constraints."""
     conn = sqlite3.connect(DB_FILE_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -82,19 +103,16 @@ def get_db_metadata():
     if not date_col:
         date_col = next((col for col in columns if 'date' in col.lower()), None)
     
-    # Absolute default dates if everything else fails
-    parsed_min = pd.Timestamp("2025-05-02")
+    parsed_min = pd.Timestamp("2025-04-01")
     parsed_max = pd.Timestamp("2026-04-30")
     
     if date_col:
         try:
-            # 💡 FIX: Fetch all unique date strings instead of using SQLite's broken text MIN/MAX
             query = f"SELECT DISTINCT [{date_col}] FROM [{table_name}] WHERE [{date_col}] IS NOT NULL AND [{date_col}] != ''"
             unique_dates_df = pd.read_sql_query(query, conn)
             
             if not unique_dates_df.empty:
-                # Force correct chronological conversion inside Pandas
-                converted_dates = pd.to_datetime(unique_dates_df[date_col], dayfirst=True, errors='coerce').dropna()
+                converted_dates = safe_parse_mixed_dates(unique_dates_df[date_col]).dropna()
                 if not converted_dates.empty:
                     parsed_min = converted_dates.min()
                     parsed_max = converted_dates.max()
@@ -111,7 +129,6 @@ table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
 with st.sidebar:
     st.header("System Status")
     st.success("Master SQL Database Active (Indexed)")
-    # 🔄 This message will now accurately show Apr/May 2025 to Apr 2026
     st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
     
     if st.button("Force Synchronize with GitHub"):
@@ -132,7 +149,6 @@ elif time_preset == "Last 6 Months":
     start_date = (db_max_date - pd.DateOffset(months=6)).date()
     end_date = db_max_date.date()
 elif time_preset == "Last 12 Months":
-    # 💡 The 'Last 12 Months' preset filter will now pull all your 2025 data correctly!
     start_date = (db_max_date - pd.DateOffset(months=12)).date()
     end_date = db_max_date.date()
 else:
@@ -147,7 +163,6 @@ def query_targeted_data(part_numbers):
         return pd.DataFrame()
         
     conn = sqlite3.connect(DB_FILE_PATH)
-    
     cursor = conn.cursor()
     cursor.execute(f"PRAGMA table_info([{table_name}])")
     columns = [col[1] for col in cursor.fetchall()]
@@ -161,8 +176,8 @@ def query_targeted_data(part_numbers):
     conn.close()
     
     if not df.empty and date_col_name in df.columns:
-        # Force strict dayfirst parsing to avoid mixing up days and months
-        df[date_col_name] = pd.to_datetime(df[date_col_name], dayfirst=True, errors='coerce')
+        # Run mixed dates validation across fetched arrays cleanly
+        df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
     return df
 
 
