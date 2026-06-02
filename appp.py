@@ -4,40 +4,67 @@ from datetime import datetime
 import io
 import sqlite3
 import os
+import urllib.request
+# Make sure to add 'py7zr' to your requirements.txt
+import py7zr
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="Sales Quantity Checker", layout="wide")
 st.title("Sales Quantity Checker")
 
-# 🔴 WORKING PATHS 🔴
-GITHUB_ZIP_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/Sales.zip"
+# 🔴 LOCKED ABSOLUTE MASTER DATABASE URL 🔴
+GITHUB_7Z_URL = "https://raw.githubusercontent.com/mokshinfection/Sales-gty-Checker/main/sales.7z"
 DB_FILE_PATH = "Sales.db"
 
-# --- DB ENGINE CORE HELPERS ---
-def create_sqlite_db_from_df(df, table_name="sales_records"):
-    """Packs an initial base dataframe into a clean local SQLite structure."""
-    conn = sqlite3.connect(DB_FILE_PATH)
-    df_to_save = df.copy()
-    date_col = 'Invoice Date' if 'Invoice Date' in df_to_save.columns else 'Date'
-    if date_col in df_to_save.columns:
-        df_to_save[date_col] = df_to_save[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+def extract_and_init_sqlite():
+    """Downloads sales.7z, extracts the internal CSV file, and seeds the SQLite backend."""
+    try:
+        # Download the compressed .7z archive from GitHub
+        with urllib.request.urlopen(GITHUB_7Z_URL) as response:
+            archive_bytes = response.read()
+            
+        # Extract the CSV contents completely in-memory
+        with py7zr.SevenZipFile(io.BytesIO(archive_bytes), mode='r') as archive:
+            extracted_data = archive.getallnames()
+            # Find the first target CSV inside the archive
+            csv_filename = next((name for name in extracted_data if name.endswith('.csv')), None)
+            if not csv_filename:
+                raise FileNotFoundError("Could not locate a valid .csv file inside the downloaded sales.7z archive.")
+                
+            # Extract out the specific target file contents
+            extracted_dict = archive.read([csv_filename])
+            csv_bytes = extracted_dict[csv_filename].read()
+
+        # Load into Pandas, clean column padding strings, and format datetimes
+        df = pd.read_csv(io.BytesIO(csv_bytes), low_memory=False, on_bad_lines='skip')
+        df.columns = df.columns.str.strip()
         
-    df_to_save.to_sql(table_name, conn, if_exists='replace', index=False)
-    conn.commit()
-    conn.close()
+        date_col = 'Invoice Date' if 'Invoice Date' in df.columns else 'Date'
+        if date_col not in df.columns:
+            raise KeyError(f"Could not locate date index. Evaluated columns: {', '.join(df.columns)}")
+            
+        df[date_col] = pd.to_datetime(df[date_col], dayfirst=True, errors='coerce')
+        df = df.dropna(subset=[date_col])
+        
+        # Seed into local embedded SQLite memory space
+        conn = sqlite3.connect(DB_FILE_PATH)
+        df_to_save = df.copy()
+        df_to_save[date_col] = df_to_save[date_col].dt.strftime('%Y-%m-%d %H:%M:%S')
+        df_to_save.to_sql("sales_records", conn, if_exists='replace', index=False)
+        conn.commit()
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"Failed to bootstrap database from source raw repository architecture.\n\nError: {e}")
+        st.stop()
 
 # --- DATA PROCESSING (CACHED FROM SQLITE) ---
 @st.cache_data(ttl=3600)
 def load_backend_data_from_sqlite():
-    """Loads historical sales records dynamically out of the SQLite Engine."""
+    """Loads records directly out of the local SQLite storage layer."""
     if not os.path.exists(DB_FILE_PATH):
-        with st.spinner("Downloading base initialization matrix from GitHub..."):
-            initial_df = pd.read_csv(GITHUB_ZIP_URL, compression='zip', low_memory=False, on_bad_lines='skip')
-            initial_df.columns = initial_df.columns.str.strip()
-            date_col = 'Invoice Date' if 'Invoice Date' in initial_df.columns else 'Date'
-            initial_df[date_col] = pd.to_datetime(initial_df[date_col], dayfirst=True, errors='coerce')
-            initial_df = initial_df.dropna(subset=[date_col])
-            create_sqlite_db_from_df(initial_df)
+        with st.spinner("Downloading and processing absolute master archive from GitHub..."):
+            extract_and_init_sqlite()
 
     conn = sqlite3.connect(DB_FILE_PATH)
     df = pd.read_sql_query("SELECT * FROM sales_records", conn)
@@ -48,14 +75,12 @@ def load_backend_data_from_sqlite():
     return df, date_col
 
 def generate_filtered_database(df, date_col, start_date, end_date):
-    """Slices data by selected dates and pivots to find Quantities, Frequencies, and Trend metrics."""
-    # Find overall dataset max date for historical trend sliding baselines
+    """Slices historical sets and applies performance and structural trends."""
     max_db_date = df[date_col].max()
     three_months_ago = (max_db_date - pd.DateOffset(months=3)).date()
     twelve_months_ago = (max_db_date - pd.DateOffset(months=12)).date()
     max_date_conv = max_db_date.date()
 
-    # Pre-calculate Trend numbers across full file intervals before window filters are applied
     mask_3m = (df[date_col].dt.date >= three_months_ago) & (df[date_col].dt.date <= max_date_conv)
     mask_12m = (df[date_col].dt.date >= twelve_months_ago) & (df[date_col].dt.date <= max_date_conv)
 
@@ -64,24 +89,20 @@ def generate_filtered_database(df, date_col, start_date, end_date):
     code_col = 'Product Code' if 'Product Code' in df.columns else 'Part Code'
     desc_col = 'Description'
 
-    # 3-Month and 12-Month volumes per part
     qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
     qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
-    # Calculate average unit cost across historical items safely if rate info exists
     rate_col = 'Rate' if 'Rate' in df.columns else ('Unit Cost' if 'Unit Cost' in df.columns else None)
     if rate_col:
         unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost')
     else:
         unit_costs = pd.DataFrame(columns=[part_col, 'Unit Cost'])
 
-    # Standard filtering for the UI window
     mask = (df[date_col].dt.date >= start_date) & (df[date_col].dt.date <= end_date)
     filtered_df = df[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
-    # Pivot generation
     pivot_qty = filtered_df.pivot_table(
         index=[part_col, code_col, desc_col], columns='Area', values=qty_col, aggfunc='sum', fill_value=0
     ).reset_index()
@@ -106,7 +127,6 @@ def generate_filtered_database(df, date_col, start_date, end_date):
     merge_cols = ['PartNumber', 'Product Code', 'Description', 'Total Freq'] + list(freq_rename_map.values())
     final_db = pd.merge(pivot_qty, pivot_freq[merge_cols], on=['PartNumber', 'Product Code', 'Description'], how='left')
     
-    # Attach Trend information
     qty_3m.rename(columns={part_col: 'PartNumber'}, inplace=True)
     qty_12m.rename(columns={part_col: 'PartNumber'}, inplace=True)
     unit_costs.rename(columns={part_col: 'PartNumber'}, inplace=True)
@@ -115,7 +135,6 @@ def generate_filtered_database(df, date_col, start_date, end_date):
     final_db = pd.merge(final_db, qty_12m, on='PartNumber', how='left').fillna({'qty_12m': 0})
     final_db = pd.merge(final_db, unit_costs, on='PartNumber', how='left').fillna({'Unit Cost': 0.0})
     
-    # Compute Trend logic mapping strings
     def calculate_trend_row(row):
         q3 = row['qty_3m']
         q12 = row['qty_12m']
@@ -132,7 +151,6 @@ def generate_filtered_database(df, date_col, start_date, end_date):
     final_db['Trend'] = final_db.apply(calculate_trend_row, axis=1)
     return final_db, target_areas
 
-# --- EXCEL EXPORT HELPER ---
 def convert_df_to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -140,7 +158,7 @@ def convert_df_to_excel(df):
     return output.getvalue()
 
 
-# --- SIDEBAR: SYSTEM STATUS & UPDATE ---
+# --- SIDEBAR: SYSTEM STATUS ---
 with st.sidebar:
     st.header("System Status")
     try:
@@ -148,75 +166,17 @@ with st.sidebar:
         db_min_date = raw_data[date_col_name].min().date()
         db_max_date = raw_data[date_col_name].max().date()
             
-        st.success("SQLite Engine Active")
-        # 🔄 DYNAMIC TIME-WINDOW DISPLAY DETECTED FROM THE INTERNAL FILE MATRIX
+        st.success("Master Repository Active")
         st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
         
-        if st.button("Force Data Refresh"):
+        if st.button("Force Synchronize with GitHub"):
             st.cache_data.clear()
+            if os.path.exists(DB_FILE_PATH):
+                os.remove(DB_FILE_PATH)
             st.rerun()
     except Exception as e:
-        st.error(f"Failed to load data from SQLite instance.\n\nError: {e}")
+        st.error(f"Failed to resolve data frame parameters: {e}")
         st.stop()
-        
-    st.divider()
-    st.header("Update Master Database")
-    st.write("Upload your new monthly files or a custom `Sales.db` snapshot file to append records incrementally.")
-    
-    monthly_files = st.file_uploader("Upload Data Files (.csv, .xlsx, .db)", type=["csv", "xlsx", "db"], accept_multiple_files=True)
-    
-    if monthly_files:
-        try:
-            new_dataframes = []
-            for file in monthly_files:
-                if file.name.endswith('.db'):
-                    with open(DB_FILE_PATH, "wb") as f:
-                        f.write(file.getbuffer())
-                    st.info("Restoring data infrastructure from uploaded SQLite model database...")
-            
-            for file in monthly_files:
-                if file.name.endswith('.csv'):
-                    df_temp = pd.read_csv(file, low_memory=False)
-                    df_temp.columns = df_temp.columns.str.strip()
-                    new_dataframes.append(df_temp)
-                elif file.name.endswith('.xlsx'):
-                    df_temp = pd.read_excel(file)
-                    df_temp.columns = df_temp.columns.str.strip()
-                    new_dataframes.append(df_temp)
-            
-            if new_dataframes:
-                with st.spinner("Appending new records directly to existing database..."):
-                    conn = sqlite3.connect(DB_FILE_PATH)
-                    for incoming_df in new_dataframes:
-                        t_date = 'Invoice Date' if 'Invoice Date' in incoming_df.columns else 'Date'
-                        if t_date in incoming_df.columns:
-                            incoming_df[t_date] = pd.to_datetime(incoming_df[t_date], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
-                        incoming_df.to_sql("sales_records", conn, if_exists='append', index=False)
-                    
-                    dedup_df = pd.read_sql_query("SELECT * FROM sales_records", conn)
-                    dedup_df = dedup_df.drop_duplicates()
-                    dedup_df.to_sql("sales_records", conn, if_exists='replace', index=False)
-                    conn.close()
-                    st.success("New entries saved cleanly without matching duplicates!")
-            
-            conn = sqlite3.connect(DB_FILE_PATH)
-            final_row_count = conn.execute("SELECT count(*) FROM sales_records").fetchone()[0]
-            conn.close()
-            
-            st.metric("Total Consolidated Records", f"{final_row_count:,} rows")
-            st.cache_data.clear()
-            
-            with open(DB_FILE_PATH, "rb") as f:
-                st.download_button(
-                    label="Download Updated Master Database (.db)",
-                    data=f.read(),
-                    file_name="Sales.db",
-                    mime="application/x-sqlite3"
-                )
-            if st.button("Refresh View Interface"):
-                st.rerun()
-        except Exception as e:
-            st.error(f"Error executing database append operations: {e}")
 
 
 # --- DATE FILTERING UI ---
@@ -244,7 +204,6 @@ database, areas = generate_filtered_database(raw_data, date_col_name, start_date
 st.write("### Enter Part Numbers")
 
 if 'editor_key' not in st.session_state: st.session_state['editor_key'] = 0
-# 🔄 UPDATED: Added structural default input row entry point for order counts
 if 'input_df' not in st.session_state: 
     st.session_state['input_df'] = pd.DataFrame({"PartNumber": ["", "", "", "", ""], "Order Qty": [0, 0, 0, 0, 0]})
 
@@ -269,7 +228,6 @@ if not edited_input.empty:
         valid_inputs['PartNumber'] = valid_inputs['PartNumber'].astype(str)
         database['PartNumber'] = database['PartNumber'].astype(str)
         
-        # Merge input data array with master file features
         result_df = pd.merge(valid_inputs, database, on="PartNumber", how="left")
         
         result_df['Description'] = result_df['Description'].fillna("Not Found")
@@ -278,7 +236,6 @@ if not edited_input.empty:
         result_df['Trend'] = result_df['Trend'].fillna("🟡 Moderate Trend")
         result_df['Order Qty'] = result_df['Order Qty'].fillna(0).astype(int)
         
-        # Calculate dynamic structural cost metrics
         result_df['Total Cost'] = result_df['Order Qty'] * result_df['Unit Cost']
         
         all_numeric_cols = areas + [f"{a} Freq" for a in areas] + ['Total Qty', 'Total Freq']
@@ -295,7 +252,6 @@ if not edited_input.empty:
             horizontal=True
         )
         
-        # Dynamic placement order injection rule
         leading_cols = ['PartNumber', 'Product Code', 'Description', 'Order Qty', 'Unit Cost', 'Total Cost', 'Trend']
         
         if view_mode == "Compact View (Text Combined)":
@@ -339,7 +295,7 @@ if not edited_input.empty:
             })
             st.dataframe(styled_df, width="stretch")
         
-        # --- EXCEL DOWNLOAD FORMAT SETTING ---
+        # --- EXCEL DOWNLOAD ---
         export_cols = list(leading_cols)
         for area in areas:
             export_cols.extend([area, f"{area} Freq"])
