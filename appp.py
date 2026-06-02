@@ -93,7 +93,6 @@ def get_db_metadata():
     
     date_col = 'InvoiceDate' if 'InvoiceDate' in columns else ('Invoice Date' if 'Invoice Date' in columns else ('Date' if 'Date' in columns else columns[0]))
     
-    # Base fallback initialization 
     parsed_min = None
     parsed_max = None
     
@@ -105,7 +104,6 @@ def get_db_metadata():
             if not unique_dates_df.empty:
                 converted_dates = safe_parse_mixed_dates(unique_dates_df[date_col]).dropna()
                 if not converted_dates.empty:
-                    # 💡 UPDATED: Set the time limits dynamically based on what's found in the file
                     parsed_min = converted_dates.min()
                     parsed_max = converted_dates.max()
         except Exception:
@@ -113,7 +111,6 @@ def get_db_metadata():
             
     conn.close()
     
-    # 💡 Fallback defaults if the column is empty or un-parseable
     if parsed_min is None or pd.isnull(parsed_min): 
         parsed_min = pd.Timestamp("2025-04-01")
     if parsed_max is None or pd.isnull(parsed_max): 
@@ -128,7 +125,6 @@ table_name, date_col_name, db_min_date, db_max_date = get_db_metadata()
 with st.sidebar:
     st.header("System Status")
     st.success("Master SQL Database Active (Indexed)")
-    # 🔄 This message will automatically scale outwards as you drop newer data inside the database
     st.info(f"**Total History Available:**\n\n{db_min_date.strftime('%d %b %Y')} to {db_max_date.strftime('%d %b %Y')}")
     
     if st.button("Force Synchronize with GitHub"):
@@ -169,6 +165,9 @@ def query_targeted_data(part_numbers):
     
     part_col = 'Partnumber' if 'Partnumber' in columns else ('PartNumber' if 'PartNumber' in columns else ('Part Number' if 'Part Number' in columns else columns[0]))
     
+    # 💡 FIX: Force case-insensitive mapping for the active Date column name inside query results
+    actual_date_col = next((c for c in columns if c.lower() == date_col_name.lower()), columns[0])
+    
     placeholders = ', '.join(['?'] * len(part_numbers))
     query = f"SELECT * FROM [{table_name}] WHERE [{part_col}] IN ({placeholders})"
     
@@ -178,15 +177,20 @@ def query_targeted_data(part_numbers):
     if not df.empty:
         if part_col != 'PartNumber':
             df.rename(columns={part_col: 'PartNumber'}, inplace=True)
-        if date_col_name in df.columns:
-            df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
+        
+        # Standardize query dataframe date columns to match parent naming configurations
+        if actual_date_col != date_col_name:
+            df.rename(columns={actual_date_col: date_col_name}, inplace=True)
+            
+        # 💡 FIX: Safely parse and convert dates into real datetime structures before executing generate_filtered_database
+        df[date_col_name] = safe_parse_mixed_dates(df[date_col_name])
             
     return df
 
 
 def generate_filtered_database(df, start_date, end_date):
     """Processes trends and layouts ONLY for the targeted matches."""
-    if df.empty:
+    if df.empty or date_col_name not in df.columns:
         return pd.DataFrame(), ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
 
     part_col = 'PartNumber'
@@ -194,30 +198,24 @@ def generate_filtered_database(df, start_date, end_date):
     code_col = 'Productcode' if 'Productcode' in df.columns else ('Product Code' if 'Product Code' in df.columns else ('Part Code' if 'Part Code' in df.columns else 'Product Code'))
     desc_col = 'Description'
 
-    max_db_date = df[date_col_name].max() if date_col_name in df.columns else pd.Timestamp(end_date)
+    max_db_date = df[date_col_name].max()
     if pd.isnull(max_db_date): max_db_date = pd.Timestamp(end_date)
         
     three_months_ago = (max_db_date - pd.DateOffset(months=3)).date()
     twelve_months_ago = (max_db_date - pd.DateOffset(months=12)).date()
     max_date_conv = max_db_date.date()
 
-    if date_col_name in df.columns:
-        mask_3m = (df[date_col_name].dt.date >= three_months_ago) & (df[date_col_name].dt.date <= max_date_conv)
-        mask_12m = (df[date_col_name].dt.date >= twelve_months_ago) & (df[date_col_name].dt.date <= max_date_conv)
-        qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
-        qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
-    else:
-        qty_3m = pd.DataFrame({part_col: df[part_col].unique(), 'qty_3m': 0})
-        qty_12m = pd.DataFrame({part_col: df[part_col].unique(), 'qty_12m': 0})
+    mask_3m = (df[date_col_name].dt.date >= three_months_ago) & (df[date_col_name].dt.date <= max_date_conv)
+    mask_12m = (df[date_col_name].dt.date >= twelve_months_ago) & (df[date_col_name].dt.date <= max_date_conv)
+    
+    qty_3m = df[mask_3m].groupby(part_col)[qty_col].sum().reset_index(name='qty_3m')
+    qty_12m = df[mask_12m].groupby(part_col)[qty_col].sum().reset_index(name='qty_12m')
     
     rate_col = 'Rate' if 'Rate' in df.columns else ('Unit Cost' if 'Unit Cost' in df.columns else None)
     unit_costs = df.groupby(part_col)[rate_col].mean().reset_index(name='Unit Cost') if rate_col else pd.DataFrame(columns=[part_col, 'Unit Cost'])
 
-    if date_col_name in df.columns:
-        mask = (df[date_col_name].dt.date >= start_date) & (df[date_col_name].dt.date <= end_date)
-        filtered_df = df[mask].copy()
-    else:
-        filtered_df = df.copy()
+    mask = (df[date_col_name].dt.date >= start_date) & (df[date_col_name].dt.date <= end_date)
+    filtered_df = df[mask].copy()
     
     target_areas = ["Hoskote", "Kothagudem", "Ramagundam", "Neyveli", "Nellore"]
     
