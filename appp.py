@@ -47,10 +47,20 @@ if 'editor_key' not in st.session_state:
 
 # --- HELPER FUNCTIONS ---
 def clear_list():
-    # 1. Clear the underlying dataframe
+    # Clear the underlying dataframe
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
-    # 2. Increment the key to force Streamlit to completely forget the old widget's edits
+    # Increment the key to force Streamlit to completely forget the old widget's edits
     st.session_state.editor_key += 1
+
+def style_trend_text(val):
+    val_str = str(val)
+    if "Down" in val_str:
+        return 'background-color: #ffcccc; color: black;'
+    elif "Moderate" in val_str:
+        return 'background-color: #ffffcc; color: black;'
+    elif "Up" in val_str:
+        return 'background-color: #ccffcc; color: black;'
+    return ""
 
 # --- UI LAYOUT ---
 st.title("📦 Parts Order & Sales Analysis")
@@ -101,7 +111,6 @@ st.subheader("1. Enter Part Numbers")
 col1, col2 = st.columns([4, 1])
 
 with col1:
-    # Notice the key uses the dynamic counter now
     edited_df = st.data_editor(
         st.session_state.input_grid, 
         num_rows="dynamic",
@@ -193,12 +202,32 @@ if st.button("Analyze Parts", type="primary"):
                 
             final_df = pd.DataFrame(results)
             st.subheader("2. Analysis Results")
-            st.dataframe(final_df, use_container_width=True)
+            
+            # --- APPLY BACKGROUND COLORS ---
+            qty_cols = [c for c in final_df.columns if "Qty" in c and c != "Order Qty"]
+            freq_cols = [c for c in final_df.columns if "Freq" in c]
+            
+            styled_df = final_df.style
+            
+            if "Trend" in final_df.columns:
+                styled_df = styled_df.map(style_trend_text, subset=['Trend'])
+                
+            if qty_cols:
+                # Apply light orange to all Qty columns
+                styled_df = styled_df.map(lambda _: 'background-color: #ffe6cc; color: black;', subset=qty_cols)
+                
+            if freq_cols:
+                # Apply light blue to all Freq columns
+                styled_df = styled_df.map(lambda _: 'background-color: #cce5ff; color: black;', subset=freq_cols)
+                
+            # Show styled dataframe in Streamlit
+            st.dataframe(styled_df, use_container_width=True)
             
             # --- DOWNLOAD AS EXCEL BUTTON ---
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                final_df.to_excel(writer, index=False, sheet_name='Sales Analysis')
+                # Export the styled dataframe so colors carry over to Excel
+                styled_df.to_excel(writer, index=False, sheet_name='Sales Analysis')
             
             download_data = buffer.getvalue()
             
