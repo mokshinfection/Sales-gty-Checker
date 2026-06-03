@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
-DB_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.7z"
+DB_URL = "https://github.com/mokshinfection/Sales-gty-Checker/blob/main/sales.7z"
 ARCHIVE_NAME = "sales.7z"
 TABLE_NAME = "Combined_VSPC_Master"
 TARGET_BRANCHES = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
