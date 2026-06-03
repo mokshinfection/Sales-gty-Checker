@@ -4,18 +4,51 @@ import sqlite3
 import py7zr
 import requests
 import os
+import glob # <-- ADD THIS IMPORT
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
 DB_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.7z"
 ARCHIVE_NAME = "sales.7z"
-DB_NAME = "sales.db" # Update if the extracted .db file has a different name
 TABLE_NAME = "Combined_VSPC_Master"
 TARGET_BRANCHES = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
 
 st.set_page_config(layout="wide", page_title="Inventory & Sales Tracker")
 
+# --- DATA ACQUISITION & SETUP ---
+@st.cache_resource
+def setup_database():
+    """Downloads the archive, extracts it, and dynamically finds the .db file."""
+    # 1. Download if the archive doesn't exist
+    if not os.path.exists(ARCHIVE_NAME):
+        st.info("Downloading database from GitHub...")
+        response = requests.get(DB_URL, stream=True)
+        with open(ARCHIVE_NAME, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        
+        # 2. Extract the archive
+        st.info("Extracting database...")
+        with py7zr.SevenZipFile(ARCHIVE_NAME, mode='r') as z:
+            z.extractall()
+            
+    # 3. DYNAMICALLY find the extracted .db file (even if it's in a subfolder)
+    db_files = glob.glob("**/*.db", recursive=True)
+    
+    if db_files:
+        print(f"Successfully found database: {db_files[0]}")
+        return db_files[0] # Return the actual path to the extracted database
+    else:
+        st.error("CRITICAL: No .db file was found inside the extracted archive!")
+        return "fallback.db"
+
+db_path = setup_database()
+
+def get_db_connection():
+    return sqlite3.connect(db_path)
+
+# ... (rest of your code below remains the same)
 # --- DATA ACQUISITION & SETUP ---
 @st.cache_resource
 def setup_database():
