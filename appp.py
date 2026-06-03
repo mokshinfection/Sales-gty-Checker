@@ -7,9 +7,6 @@ from dateutil.relativedelta import relativedelta
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
-# NUKE SESSION STATE (Forces app to reload fresh data instead of crashing on old data)
-st.session_state.clear() 
-
 GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
 
 # --- BULLETPROOF DATA LOADING ---
