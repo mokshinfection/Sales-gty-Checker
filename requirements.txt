@@ -2,3 +2,4 @@ streamlit
 pandas
 py7zr
 requests
+openpyxl
