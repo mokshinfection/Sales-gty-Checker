@@ -1,56 +1,31 @@
 import streamlit as st
 import pandas as pd
-import py7zr
-import requests
 import os
-import io
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
-GITHUB_7Z_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.7z"
-EXTRACT_DIR = "data"
-CSV_FILE_PATH = os.path.join(EXTRACT_DIR, "sales.csv") # Assuming the file inside is sales.csv
+# Use the direct raw link to your new parquet file on GitHub
+GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
 
-# --- DATA LOADING & PROCESSING ---
-@st.cache_data
-def download_and_extract_data():
-    if not os.path.exists(EXTRACT_DIR):
-        os.makedirs(EXTRACT_DIR)
-    
-    # Download 7z if it doesn't exist locally
-    archive_path = os.path.join(EXTRACT_DIR, "sales.7z")
-    if not os.path.exists(archive_path):
-        st.info("Downloading data from GitHub... Please wait.")
-        response = requests.get(GITHUB_7Z_URL)
-        with open(archive_path, 'wb') as f:
-            f.write(response.content)
-            
-    # Extract 7z
-    if not os.path.exists(CSV_FILE_PATH):
-        with py7zr.SevenZipFile(archive_path, mode='r') as z:
-            z.extractall(path=EXTRACT_DIR)
-            
-    # Load into Pandas (Find the first CSV in the extracted folder)
-    extracted_files = [f for f in os.listdir(EXTRACT_DIR) if f.endswith('.csv')]
-    if not extracted_files:
-        st.error("No CSV file found inside the .7z archive.")
+# --- FAST DATA LOADING ---
+@st.cache_data(ttl=3600)  # Caches the data for 1 hour so it stays lightning fast
+def load_fast_data():
+    try:
+        # Pandas reads parquet over network streams instantly
+        df = pd.read_parquet(GITHUB_PARQUET_URL)
+        return df
+    except Exception as e:
+        st.error(f"Error loading hosted data: {e}")
         return pd.DataFrame()
-        
-    df = pd.read_csv(os.path.join(EXTRACT_DIR, extracted_files[0]))
-    
-    # Ensure Invoice Date is datetime
-    df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
-    return df
-
 
 # Initialize session state for the database
 if 'master_df' not in st.session_state:
-    st.session_state.master_df = download_and_extract_data()
+    st.session_state.master_df = load_fast_data()
 
-# Initialize session state for the input grid
+# Initialize session state for the input grid if not present
 if 'input_grid' not in st.session_state:
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
 
@@ -61,11 +36,11 @@ def color_trend(val):
     try:
         val_float = float(val)
         if val_float < 0.7:
-            return 'background-color: #ffcccc; color: black;' # Red / Downward
+            return 'background-color: #ffcccc; color: black;'
         elif 0.7 <= val_float <= 1.14:
-            return 'background-color: #ffffcc; color: black;' # Yellow / Moderate
+            return 'background-color: #ffffcc; color: black;'
         elif val_float >= 1.15:
-            return 'background-color: #ccffcc; color: black;' # Green / Upward
+            return 'background-color: #ccffcc; color: black;'
     except:
         return ""
     return ""
@@ -82,15 +57,21 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload CSV to append to database", type=['csv'])
     if uploaded_file:
         new_data = pd.read_csv(uploaded_file)
+        new_data.columns = new_data.columns.str.strip()
         new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
         st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
-        st.success("Data appended successfully!")
+        st.success("New data appended successfully!")
         
     st.header("Time Filter")
     filter_option = st.selectbox("Select Date Range", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"])
     
-    max_date = st.session_state.master_df['Invoice Date'].max()
-    if pd.isna(max_date): max_date = datetime.today()
+    # Safely look for Invoice Date
+    if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
+        max_date = st.session_state.master_df['Invoice Date'].max()
+        if pd.isna(max_date): 
+            max_date = datetime.today()
+    else:
+        max_date = datetime.today()
     
     start_date, end_date = None, max_date
     if filter_option == "Last 3 Months":
@@ -123,79 +104,74 @@ with col2:
 if st.button("Analyze Parts", type="primary"):
     df = st.session_state.master_df
     
-    # Filter valid inputs
-    query_parts = edited_df[edited_df["PartNumber"].str.strip() != ""]
-    
-    if query_parts.empty:
-        st.warning("Please enter at least one valid Part Number.")
+    if df.empty:
+        st.error("The base database is currently empty. Please verify your source file.")
     else:
-        results = []
-        # Areas of interest
-        target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
+        query_parts = edited_df[edited_df["PartNumber"].astype(str).str.strip() != ""]
         
-        # Calculate time cutoffs for trend
-        trend_12m_start = max_date - relativedelta(months=12)
-        trend_3m_start = max_date - relativedelta(months=3)
-        
-        # Filter DB based on user selected global date range
-        mask_global = (df['Invoice Date'] >= start_date) & (df['Invoice Date'] <= end_date)
-        df_filtered = df.loc[mask_global]
-
-        for index, row in query_parts.iterrows():
-            p_num = str(row['PartNumber']).strip()
-            order_qty = row['Order Qty']
-            
-            # Extract Part Data
-            part_data = df[df['PartNumber'] == p_num]
-            part_data_filtered = df_filtered[df_filtered['PartNumber'] == p_num]
-            
-            if part_data.empty:
-                results.append({"Part Number": p_num, "Description": "Not Found", "Order Qty": order_qty})
-                continue
-                
-            # Static Details (take first instance)
-            desc = part_data['Description'].iloc[0]
-            prod_code = part_data['Product_Code'].iloc[0]
-            unit_cost = part_data['Cost'].iloc[0]
-            
-            # Trend Calculation (Always uses last 12 and last 3 months from dataset's max date)
-            qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum()
-            qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum()
-            
-            trend = 0
-            if qty_12m > 0:
-                trend = round(qty_3m / qty_12m, 2)
-            
-            # Area Metrics calculation based on the globally filtered timeframe
-            row_result = {
-                "Part Number": p_num,
-                "Description": desc,
-                "Product Code": prod_code,
-                "Order Qty": order_qty,
-                "Unit Cost": unit_cost,
-                "Trend": trend
-            }
-            
-            total_sales_qty = part_data_filtered['qty'].sum()
-            total_freq = part_data_filtered['InvoiceNumber'].nunique() # Unique invoices = frequency
-            
-            for area in target_areas:
-                area_data = part_data_filtered[part_data_filtered['Area'] == area]
-                row_result[f"{area} Qty"] = area_data['qty'].sum()
-                row_result[f"{area} Freq"] = area_data['InvoiceNumber'].nunique()
-                
-            row_result["Total Sales Qty"] = total_sales_qty
-            row_result["Total Freq"] = total_freq
-            
-            results.append(row_result)
-            
-        final_df = pd.DataFrame(results)
-        
-        st.subheader("2. Analysis Results")
-        
-        # Apply conditional formatting to the Trend column
-        if "Trend" in final_df.columns:
-            styled_df = final_df.style.applymap(color_trend, subset=['Trend'])
-            st.dataframe(styled_df, use_container_width=True)
+        if query_parts.empty:
+            st.warning("Please enter at least one valid Part Number.")
         else:
-            st.dataframe(final_df, use_container_width=True)
+            results = []
+            target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
+            
+            trend_12m_start = max_date - relativedelta(months=12)
+            trend_3m_start = max_date - relativedelta(months=3)
+            
+            mask_global = (df['Invoice Date'] >= start_date) & (df['Invoice Date'] <= end_date)
+            df_filtered = df.loc[mask_global]
+
+            for index, row in query_parts.iterrows():
+                p_num = str(row['PartNumber']).strip()
+                order_qty = row['Order Qty']
+                
+                part_data = df[df['PartNumber'].astype(str) == p_num]
+                part_data_filtered = df_filtered[df_filtered['PartNumber'].astype(str) == p_num]
+                
+                if part_data.empty:
+                    results.append({"Part Number": p_num, "Description": "Not Found", "Order Qty": order_qty})
+                    continue
+                    
+                desc = part_data['Description'].iloc[0] if 'Description' in part_data.columns else "N/A"
+                prod_code = part_data['Product_Code'].iloc[0] if 'Product_Code' in part_data.columns else "N/A"
+                unit_cost = part_data['Cost'].iloc[0] if 'Cost' in part_data.columns else 0
+                
+                qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
+                qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
+                
+                trend = round(qty_3m / qty_12m, 2) if qty_12m > 0 else 0
+                
+                row_result = {
+                    "Part Number": p_num,
+                    "Description": desc,
+                    "Product Code": prod_code,
+                    "Order Qty": order_qty,
+                    "Unit Cost": unit_cost,
+                    "Trend": trend
+                }
+                
+                total_sales_qty = part_data_filtered['qty'].sum() if 'qty' in part_data_filtered.columns else 0
+                total_freq = part_data_filtered['InvoiceNumber'].nunique() if 'InvoiceNumber' in part_data_filtered.columns else 0
+                
+                for area in target_areas:
+                    if 'Area' in part_data_filtered.columns:
+                        area_data = part_data_filtered[part_data_filtered['Area'] == area]
+                        row_result[f"{area} Qty"] = area_data['qty'].sum() if 'qty' in area_data.columns else 0
+                        row_result[f"{area} Freq"] = area_data['InvoiceNumber'].nunique() if 'InvoiceNumber' in area_data.columns else 0
+                    else:
+                        row_result[f"{area} Qty"] = 0
+                        row_result[f"{area} Freq"] = 0
+                    
+                row_result["Total Sales Qty"] = total_sales_qty
+                row_result["Total Freq"] = total_freq
+                
+                results.append(row_result)
+                
+            final_df = pd.DataFrame(results)
+            st.subheader("2. Analysis Results")
+            
+            if "Trend" in final_df.columns:
+                styled_df = final_df.style.map(color_trend, subset=['Trend'])
+                st.dataframe(styled_df, use_container_width=True)
+            else:
+                st.dataframe(final_df, use_container_width=True)
