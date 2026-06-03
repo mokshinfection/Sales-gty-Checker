@@ -1,15 +1,59 @@
 import streamlit as st
 import pandas as pd
-import os
+import time
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
-# Use the direct raw link to your parquet file on GitHub
+# NUKE SESSION STATE (Forces app to reload fresh data instead of crashing on old data)
+# You can delete this line tomorrow once everything is working stably.
+st.session_state.clear() 
+
 GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
 
+# --- BULLETPROOF DATA LOADING ---
+@st.cache_data(ttl=3600)
+def load_fast_data():
+    try:
+        # Cache-buster: Forces GitHub to give us the absolute newest file, not a cached one
+        bust_url = f"{GITHUB_PARQUET_URL}?v={int(time.time())}"
+        df = pd.read_parquet(bust_url)
+        
+        # Aggressively strip spaces, hidden newlines, and quotes from column names
+        df.columns = df.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
+        
+        # --- DYNAMIC DATE FINDER ---
+        if 'Invoice Date' not in df.columns:
+            # Hunt for any column that has the word "date" in it (case-insensitive)
+            possible_cols = [col for col in df.columns if 'date' in col.lower()]
+            if possible_cols:
+                actual_date_col = possible_cols[0] # Grab the first match
+                df.rename(columns={actual_date_col: 'Invoice Date'}, inplace=True)
+                st.toast(f"Auto-renamed column '{actual_date_col}' to 'Invoice Date'")
+            else:
+                # If it absolutely cannot find a date column, print the columns to the screen so we can see them!
+                st.error(f"CRITICAL ERROR: No date column found! Here is exactly what your columns are named: {df.columns.tolist()}")
+                
+        # Convert to datetime
+        if 'Invoice Date' in df.columns:
+            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+            
+        return df
+    except Exception as e:
+        st.error(f"Error loading hosted data: {e}")
+        return pd.DataFrame()
+
+# Initialize session state for the database
+if 'master_df' not in st.session_state:
+    st.session_state.master_df = load_fast_data()
+
+# Initialize session state for the input grid
+if 'input_grid' not in st.session_state:
+    st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
+
+# ... (The rest of your Helper Functions and UI Layout code goes exactly here, unchanged) ...
 # --- FAST DATA LOADING ---
 @st.cache_data(ttl=3600)  # Caches data for 1 hour for fast loading
 def load_fast_data():
