@@ -167,9 +167,13 @@ if st.button("Analyze Parts", type="primary"):
                 qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
                 qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
                 
-                # Trend Arrow Logic
-                trend_ratio = (qty_3m / qty_12m) if qty_12m > 0 else 0
-                if qty_12m == 0:
+                # --- UPDATED TREND ARROW LOGIC (AVERAGES) ---
+                avg_12m = qty_12m / 12
+                avg_3m = qty_3m / 3
+                
+                trend_ratio = (avg_3m / avg_12m) if avg_12m > 0 else 0
+                
+                if avg_12m == 0:
                     trend_display = "➖ No Data"
                 elif trend_ratio < 0.7:
                     trend_display = "⬇️ Down"
