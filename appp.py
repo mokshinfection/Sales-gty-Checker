@@ -44,7 +44,7 @@ def download_and_extract_data():
     # Ensure Invoice Date is datetime
     df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
     return df
-
+df.columns = df.columns.str.strip()
 # Initialize session state for the database
 if 'master_df' not in st.session_state:
     st.session_state.master_df = download_and_extract_data()
