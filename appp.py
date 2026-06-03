@@ -142,7 +142,12 @@ if st.button("Analyze Parts", type="primary"):
 
             for index, row in query_parts.iterrows():
                 p_num = str(row['PartNumber']).strip()
-                order_qty = row['Order Qty']
+                
+                # Safely convert user input Order Qty to an integer
+                try:
+                    order_qty = int(float(row['Order Qty'])) if str(row['Order Qty']).strip() else 0
+                except:
+                    order_qty = 0
                 
                 part_data = df[df['PartNumber'].astype(str) == p_num]
                 part_data_filtered = df_filtered[df_filtered['PartNumber'].astype(str) == p_num]
@@ -182,14 +187,15 @@ if st.button("Analyze Parts", type="primary"):
                     "Trend": trend_display
                 }
                 
-                total_sales_qty = part_data_filtered['qty'].sum() if 'qty' in part_data_filtered.columns else 0
-                total_freq = part_data_filtered['InvoiceNumber'].nunique() if 'InvoiceNumber' in part_data_filtered.columns else 0
+                # Force calculations to integers
+                total_sales_qty = int(part_data_filtered['qty'].sum()) if 'qty' in part_data_filtered.columns else 0
+                total_freq = int(part_data_filtered['InvoiceNumber'].nunique()) if 'InvoiceNumber' in part_data_filtered.columns else 0
                 
                 for area in target_areas:
                     if 'Area' in part_data_filtered.columns:
                         area_data = part_data_filtered[part_data_filtered['Area'] == area]
-                        row_result[f"{area} Qty"] = area_data['qty'].sum() if 'qty' in area_data.columns else 0
-                        row_result[f"{area} Freq"] = area_data['InvoiceNumber'].nunique() if 'InvoiceNumber' in area_data.columns else 0
+                        row_result[f"{area} Qty"] = int(area_data['qty'].sum()) if 'qty' in area_data.columns else 0
+                        row_result[f"{area} Freq"] = int(area_data['InvoiceNumber'].nunique()) if 'InvoiceNumber' in area_data.columns else 0
                     else:
                         row_result[f"{area} Qty"] = 0
                         row_result[f"{area} Freq"] = 0
@@ -202,8 +208,8 @@ if st.button("Analyze Parts", type="primary"):
             final_df = pd.DataFrame(results)
             st.subheader("2. Analysis Results")
             
-            # --- APPLY EXACT BACKGROUND COLORS ---
-            styled_df = final_df.style
+            # --- APPLY EXACT BACKGROUND COLORS & REMOVE DECIMALS ---
+            styled_df = final_df.style.format(precision=0)
             
             # 1. Trend
             if "Trend" in final_df.columns:
