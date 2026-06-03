@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
 # Use the direct raw link to your parquet file on GitHub
-GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/blob/main/sales.parquet"
+GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
 
 # --- FAST DATA LOADING ---
 @st.cache_data(ttl=3600)  # Caches data for 1 hour for fast loading
