@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import time
+import io
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -38,17 +39,18 @@ def load_fast_data():
 if 'master_df' not in st.session_state:
     st.session_state.master_df = load_fast_data()
 
-# Initialize session state for the input grid
+# Initialize session state for the input grid and dynamic key
 if 'input_grid' not in st.session_state:
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
+if 'editor_key' not in st.session_state:
+    st.session_state.editor_key = 0
 
 # --- HELPER FUNCTIONS ---
 def clear_list():
-    # 1. Clear the underlying data
+    # 1. Clear the underlying dataframe
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
-    # 2. Delete the widget's internal memory so the UI actually resets
-    if 'editor' in st.session_state:
-        del st.session_state['editor']
+    # 2. Increment the key to force Streamlit to completely forget the old widget's edits
+    st.session_state.editor_key += 1
 
 # --- UI LAYOUT ---
 st.title("📦 Parts Order & Sales Analysis")
@@ -99,11 +101,12 @@ st.subheader("1. Enter Part Numbers")
 col1, col2 = st.columns([4, 1])
 
 with col1:
+    # Notice the key uses the dynamic counter now
     edited_df = st.data_editor(
         st.session_state.input_grid, 
         num_rows="dynamic",
         use_container_width=True,
-        key="editor"
+        key=f"editor_{st.session_state.editor_key}"
     )
 with col2:
     st.button("Clear List", on_click=clear_list, use_container_width=True)
@@ -143,7 +146,7 @@ if st.button("Analyze Parts", type="primary"):
                 desc = part_data['Description'].iloc[0] if 'Description' in part_data.columns else "N/A"
                 prod_code = part_data['Product_Code'].iloc[0] if 'Product_Code' in part_data.columns else "N/A"
                 
-                # --- NEW UNIT COST LOGIC ---
+                # Unit Cost Logic
                 total_part_cost = part_data['Cost'].sum() if 'Cost' in part_data.columns else 0
                 total_part_qty = part_data['qty'].sum() if 'qty' in part_data.columns else 0
                 unit_cost = int(total_part_cost / total_part_qty) if total_part_qty > 0 else 0
@@ -151,7 +154,7 @@ if st.button("Analyze Parts", type="primary"):
                 qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
                 qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
                 
-                # --- NEW TREND ARROW LOGIC ---
+                # Trend Arrow Logic
                 trend_ratio = (qty_3m / qty_12m) if qty_12m > 0 else 0
                 if qty_12m == 0:
                     trend_display = "➖ No Data"
@@ -191,3 +194,18 @@ if st.button("Analyze Parts", type="primary"):
             final_df = pd.DataFrame(results)
             st.subheader("2. Analysis Results")
             st.dataframe(final_df, use_container_width=True)
+            
+            # --- DOWNLOAD AS EXCEL BUTTON ---
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                final_df.to_excel(writer, index=False, sheet_name='Sales Analysis')
+            
+            download_data = buffer.getvalue()
+            
+            st.download_button(
+                label="📥 Download Results as Excel",
+                data=download_data,
+                file_name=f"Sales_Analysis_Export_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
