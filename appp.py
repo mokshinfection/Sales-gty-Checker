@@ -8,7 +8,6 @@ from dateutil.relativedelta import relativedelta
 st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
 # NUKE SESSION STATE (Forces app to reload fresh data instead of crashing on old data)
-# You can delete this line tomorrow once everything is working stably.
 st.session_state.clear() 
 
 GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
@@ -33,8 +32,8 @@ def load_fast_data():
                 df.rename(columns={actual_date_col: 'Invoice Date'}, inplace=True)
                 st.toast(f"Auto-renamed column '{actual_date_col}' to 'Invoice Date'")
             else:
-                # If it absolutely cannot find a date column, print the columns to the screen so we can see them!
-                st.error(f"CRITICAL ERROR: No date column found! Here is exactly what your columns are named: {df.columns.tolist()}")
+                # If it absolutely cannot find a date column, print the columns to the screen
+                st.error(f"CRITICAL ERROR: No date column found! Columns: {df.columns.tolist()}")
                 
         # Convert to datetime
         if 'Invoice Date' in df.columns:
@@ -50,37 +49,6 @@ if 'master_df' not in st.session_state:
     st.session_state.master_df = load_fast_data()
 
 # Initialize session state for the input grid
-if 'input_grid' not in st.session_state:
-    st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
-
-# ... (The rest of your Helper Functions and UI Layout code goes exactly here, unchanged) ...
-# --- FAST DATA LOADING ---
-@st.cache_data(ttl=3600)  # Caches data for 1 hour for fast loading
-def load_fast_data():
-    try:
-        df = pd.read_parquet(GITHUB_PARQUET_URL)
-        
-        # Aggressive column header cleanup
-        df.columns = df.columns.str.strip().str.replace('"', '', regex=False)
-        
-        # Standardize the date column name if variation exists
-        for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
-            if variant in df.columns and 'Invoice Date' not in df.columns:
-                df.rename(columns={variant: 'Invoice Date'}, inplace=True)
-                
-        if 'Invoice Date' in df.columns:
-            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
-            
-        return df
-    except Exception as e:
-        st.error(f"Error loading hosted data: {e}")
-        return pd.DataFrame()
-
-# Initialize session state for the database
-if 'master_df' not in st.session_state:
-    st.session_state.master_df = load_fast_data()
-
-# Initialize session state for the input grid if not present
 if 'input_grid' not in st.session_state:
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
 
@@ -112,7 +80,7 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload CSV to append to database", type=['csv'])
     if uploaded_file:
         new_data = pd.read_csv(uploaded_file)
-        new_data.columns = new_data.columns.str.strip().str.replace('"', '', regex=False)
+        new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
         
         for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
             if variant in new_data.columns and 'Invoice Date' not in new_data.columns:
@@ -155,11 +123,11 @@ with col1:
     edited_df = st.data_editor(
         st.session_state.input_grid, 
         num_rows="dynamic",
-        width="stretch",
+        use_container_width=True,
         key="editor"
     )
 with col2:
-    st.button("Clear List", on_click=clear_list, width="stretch")
+    st.button("Clear List", on_click=clear_list, use_container_width=True)
 
 # 3. Processing and Output
 if st.button("Analyze Parts", type="primary"):
@@ -233,6 +201,6 @@ if st.button("Analyze Parts", type="primary"):
             
             if "Trend" in final_df.columns:
                 styled_df = final_df.style.map(color_trend, subset=['Trend'])
-                st.dataframe(styled_df, width="stretch")
+                st.dataframe(styled_df, use_container_width=True)
             else:
-                st.dataframe(final_df, width="stretch")
+                st.dataframe(final_df, use_container_width=True)
