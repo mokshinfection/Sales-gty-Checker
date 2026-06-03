@@ -7,15 +7,26 @@ from dateutil.relativedelta import relativedelta
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
-# Use the direct raw link to your new parquet file on GitHub
+# Use the direct raw link to your parquet file on GitHub
 GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/blob/main/sales.parquet"
 
 # --- FAST DATA LOADING ---
-@st.cache_data(ttl=3600)  # Caches the data for 1 hour so it stays lightning fast
+@st.cache_data(ttl=3600)  # Caches data for 1 hour for fast loading
 def load_fast_data():
     try:
-        # Pandas reads parquet over network streams instantly
         df = pd.read_parquet(GITHUB_PARQUET_URL)
+        
+        # Aggressive column header cleanup
+        df.columns = df.columns.str.strip().str.replace('"', '', regex=False)
+        
+        # Standardize the date column name if variation exists
+        for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
+            if variant in df.columns and 'Invoice Date' not in df.columns:
+                df.rename(columns={variant: 'Invoice Date'}, inplace=True)
+                
+        if 'Invoice Date' in df.columns:
+            df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+            
         return df
     except Exception as e:
         st.error(f"Error loading hosted data: {e}")
@@ -57,15 +68,21 @@ with st.sidebar:
     uploaded_file = st.file_uploader("Upload CSV to append to database", type=['csv'])
     if uploaded_file:
         new_data = pd.read_csv(uploaded_file)
-        new_data.columns = new_data.columns.str.strip()
-        new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+        new_data.columns = new_data.columns.str.strip().str.replace('"', '', regex=False)
+        
+        for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
+            if variant in new_data.columns and 'Invoice Date' not in new_data.columns:
+                new_data.rename(columns={variant: 'Invoice Date'}, inplace=True)
+                
+        if 'Invoice Date' in new_data.columns:
+            new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+            
         st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
         st.success("New data appended successfully!")
         
     st.header("Time Filter")
     filter_option = st.selectbox("Select Date Range", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"])
     
-    # Safely look for Invoice Date
     if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
         max_date = st.session_state.master_df['Invoice Date'].max()
         if pd.isna(max_date): 
@@ -94,11 +111,11 @@ with col1:
     edited_df = st.data_editor(
         st.session_state.input_grid, 
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         key="editor"
     )
 with col2:
-    st.button("Clear List", on_click=clear_list, use_container_width=True)
+    st.button("Clear List", on_click=clear_list, width="stretch")
 
 # 3. Processing and Output
 if st.button("Analyze Parts", type="primary"):
@@ -172,6 +189,6 @@ if st.button("Analyze Parts", type="primary"):
             
             if "Trend" in final_df.columns:
                 styled_df = final_df.style.map(color_trend, subset=['Trend'])
-                st.dataframe(styled_df, use_container_width=True)
+                st.dataframe(styled_df, width="stretch")
             else:
-                st.dataframe(final_df, use_container_width=True)
+                st.dataframe(final_df, width="stretch")
