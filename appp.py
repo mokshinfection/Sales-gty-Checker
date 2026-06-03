@@ -1,272 +1,200 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import py7zr
 import requests
 import os
-import glob # <-- ADD THIS IMPORT
-from datetime import datetime, timedelta
+import io
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURATION ---
-DB_URL = "https://github.com/mokshinfection/Sales-gty-Checker/blob/main/sales.7z"
-ARCHIVE_NAME = "sales.7z"
-TABLE_NAME = "Combined_VSPC_Master"
-TARGET_BRANCHES = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
+st.set_page_config(layout="wide", page_title="Sales Qty Checker")
 
-st.set_page_config(layout="wide", page_title="Inventory & Sales Tracker")
+GITHUB_7Z_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.7z"
+EXTRACT_DIR = "data"
+CSV_FILE_PATH = os.path.join(EXTRACT_DIR, "sales.csv") # Assuming the file inside is sales.csv
 
-# --- DATA ACQUISITION & SETUP ---
-@st.cache_resource
-def setup_database():
-    """Downloads the archive, extracts it, and dynamically finds the .db file."""
-    # 1. Download if the archive doesn't exist
-    if not os.path.exists(ARCHIVE_NAME):
-        st.info("Downloading database from GitHub...")
-        response = requests.get(DB_URL, stream=True)
-        with open(ARCHIVE_NAME, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        # 2. Extract the archive
-        st.info("Extracting database...")
-        with py7zr.SevenZipFile(ARCHIVE_NAME, mode='r') as z:
-            z.extractall()
-            
-    # 3. DYNAMICALLY find the extracted .db file (even if it's in a subfolder)
-    db_files = glob.glob("**/*.db", recursive=True)
+# --- DATA LOADING & PROCESSING ---
+@st.cache_data
+def download_and_extract_data():
+    if not os.path.exists(EXTRACT_DIR):
+        os.makedirs(EXTRACT_DIR)
     
-    if db_files:
-        print(f"Successfully found database: {db_files[0]}")
-        return db_files[0] # Return the actual path to the extracted database
-    else:
-        st.error("CRITICAL: No .db file was found inside the extracted archive!")
-        return "fallback.db"
-
-db_path = setup_database()
-
-def get_db_connection():
-    return sqlite3.connect(db_path)
-
-# ... (rest of your code below remains the same)
-# --- DATA ACQUISITION & SETUP ---
-@st.cache_resource
-def setup_database():
-    """Downloads the .7z file from GitHub, extracts it, and returns the DB path."""
-    if not os.path.exists(DB_NAME):
-        st.info("Downloading database from GitHub...")
-        response = requests.get(DB_URL, stream=True)
-        with open(ARCHIVE_NAME, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+    # Download 7z if it doesn't exist locally
+    archive_path = os.path.join(EXTRACT_DIR, "sales.7z")
+    if not os.path.exists(archive_path):
+        st.info("Downloading data from GitHub... Please wait.")
+        response = requests.get(GITHUB_7Z_URL)
+        with open(archive_path, 'wb') as f:
+            f.write(response.content)
+            
+    # Extract 7z
+    if not os.path.exists(CSV_FILE_PATH):
+        with py7zr.SevenZipFile(archive_path, mode='r') as z:
+            z.extractall(path=EXTRACT_DIR)
+            
+    # Load into Pandas (Find the first CSV in the extracted folder)
+    extracted_files = [f for f in os.listdir(EXTRACT_DIR) if f.endswith('.csv')]
+    if not extracted_files:
+        st.error("No CSV file found inside the .7z archive.")
+        return pd.DataFrame()
         
-        st.info("Extracting database...")
-        with py7zr.SevenZipFile(ARCHIVE_NAME, mode='r') as z:
-            z.extractall()
-    return DB_NAME
+    df = pd.read_csv(os.path.join(EXTRACT_DIR, extracted_files[0]))
+    
+    # Ensure Invoice Date is datetime
+    df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+    return df
 
-db_path = setup_database()
+# Initialize session state for the database
+if 'master_df' not in st.session_state:
+    st.session_state.master_df = download_and_extract_data()
 
-def get_db_connection():
-    return sqlite3.connect(db_path)
+# Initialize session state for the input grid
+if 'input_grid' not in st.session_state:
+    st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
 
 # --- HELPER FUNCTIONS ---
-def get_max_date(conn):
-    """Gets the most recent Invoice Date from the DB to calculate trends against."""
-    query = f"SELECT MAX(`Invoice Date`) FROM `{TABLE_NAME}`"
-    max_date = pd.read_sql(query, conn).iloc[0, 0]
-    # Fallback to today if DB is empty or date is unparseable
-    if not max_date: return datetime.today()
+def color_trend(val):
+    if pd.isna(val) or val == "":
+        return ""
     try:
-        return pd.to_datetime(max_date)
+        val_float = float(val)
+        if val_float < 0.7:
+            return 'background-color: #ffcccc; color: black;' # Red / Downward
+        elif 0.7 <= val_float <= 1.14:
+            return 'background-color: #ffffcc; color: black;' # Yellow / Moderate
+        elif val_float >= 1.15:
+            return 'background-color: #ccffcc; color: black;' # Green / Upward
     except:
-        return datetime.today()
+        return ""
+    return ""
 
-def calculate_trend_category(ratio):
-    if pd.isna(ratio): return "No Data"
-    if ratio < 0.7: return "Downward"
-    elif ratio <= 1.14: return "Moderate"
-    else: return "Upward"
+def clear_list():
+    st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
 
-def style_trend(val):
-    """Applies CSS colors based on the Trend text."""
-    if isinstance(val, str):
-        if val == "Downward": return 'color: red; font-weight: bold'
-        if val == "Moderate": return 'color: orange; font-weight: bold'
-        if val == "Upward": return 'color: green; font-weight: bold'
-    return ''
+# --- UI LAYOUT ---
+st.title("📦 Parts Order & Sales Analysis")
 
-# --- UI: SIDEBAR & FILTERS ---
-st.title("📦 Sales & Inventory Forecasting Dashboard")
-
+# 1. Sidebar - Data Upload & Filters
 with st.sidebar:
-    st.header("Settings & Filters")
+    st.header("Upload New Data")
+    uploaded_file = st.file_uploader("Upload CSV to append to database", type=['csv'])
+    if uploaded_file:
+        new_data = pd.read_csv(uploaded_file)
+        new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+        st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
+        st.success("Data appended successfully!")
+        
+    st.header("Time Filter")
+    filter_option = st.selectbox("Select Date Range", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"])
     
-    # Date Filtering
-    st.subheader("Analysis Date Range")
-    date_option = st.radio("Select Range:", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"])
+    max_date = st.session_state.master_df['Invoice Date'].max()
+    if pd.isna(max_date): max_date = datetime.today()
     
-    conn = get_db_connection()
-    max_db_date = get_max_date(conn).date()
-    
-    if date_option == "Last 3 Months":
-        start_date = max_db_date - relativedelta(months=3)
-        end_date = max_db_date
-    elif date_option == "Last 6 Months":
-        start_date = max_db_date - relativedelta(months=6)
-        end_date = max_db_date
-    elif date_option == "Last 12 Months":
-        start_date = max_db_date - relativedelta(months=12)
-        end_date = max_db_date
+    start_date, end_date = None, max_date
+    if filter_option == "Last 3 Months":
+        start_date = max_date - relativedelta(months=3)
+    elif filter_option == "Last 6 Months":
+        start_date = max_date - relativedelta(months=6)
+    elif filter_option == "Last 12 Months":
+        start_date = max_date - relativedelta(months=12)
     else:
-        start_date = st.date_input("Start Date", max_db_date - relativedelta(months=1))
-        end_date = st.date_input("End Date", max_db_date)
+        start_date = st.date_input("Start Date", max_date - relativedelta(months=3))
+        end_date = st.date_input("End Date", max_date)
+        start_date = pd.to_datetime(start_date)
+        end_date = pd.to_datetime(end_date)
 
-    # File Uploader to append Data
-    st.markdown("---")
-    st.subheader("Upload New Data")
-    uploaded_file = st.file_uploader("Upload CSV/Excel to append to Database", type=["csv", "xlsx"])
-    if uploaded_file is not None:
-        if st.button("Process & Append Data"):
-            try:
-                new_data = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-                new_data.to_sql(TABLE_NAME, conn, if_exists="append", index=False)
-                st.success(f"Successfully appended {len(new_data)} rows!")
-            except Exception as e:
-                st.error(f"Error appending data: {e}")
-
-# --- UI: EXCEL INPUT ENVIRONMENT ---
-st.subheader("📥 Input Part Numbers & Quantities")
-
-# Initialize Session State for the Data Editor to allow clearing
-if "input_df" not in st.session_state:
-    st.session_state.input_df = pd.DataFrame({"PartNumber": [""], "Order Qty": [0]})
-
+# 2. Main Area - Interactive Excel Environment
+st.subheader("1. Enter Part Numbers")
 col1, col2 = st.columns([4, 1])
+
 with col1:
-    # The editable grid
-    edited_df = st.data_editor(st.session_state.input_df, num_rows="dynamic", use_container_width=True)
-with col2:
-    if st.button("Clear List", use_container_width=True):
-        st.session_state.input_df = pd.DataFrame({"PartNumber": [""], "Order Qty": [0]})
-        st.rerun()
-
-# Filter out empty inputs
-valid_inputs = edited_df[edited_df["PartNumber"].str.strip() != ""]
-
-# --- DATA PROCESSING & AGGREGATION ---
-if st.button("🚀 Analyze Parts", type="primary") and not valid_inputs.empty:
-    st.markdown("---")
-    st.subheader("📊 Results")
-    
-    part_numbers = valid_inputs["PartNumber"].tolist()
-    parts_tuple = tuple(part_numbers) if len(part_numbers) > 1 else f"('{part_numbers[0]}')"
-    
-    # 1. Fetch Base Part Info (Description, Product Code, Latest Cost)
-    # Assuming the most recent cost is desired, grouping by PartNumber
-    base_query = f"""
-        SELECT PartNumber, Description, `Product_Code`, AVG(Cost) as Unit_Cost
-        FROM `{TABLE_NAME}`
-        WHERE PartNumber IN {parts_tuple}
-        GROUP BY PartNumber, Description, `Product_Code`
-    """
-    base_info = pd.read_sql(base_query, conn)
-    
-    # 2. Fetch Trend Data (Last 3M vs Last 12M based on max_db_date)
-    date_3m_ago = max_db_date - relativedelta(months=3)
-    date_12m_ago = max_db_date - relativedelta(months=12)
-    
-    trend_query = f"""
-        SELECT 
-            PartNumber,
-            SUM(CASE WHEN `Invoice Date` >= '{date_3m_ago}' THEN qty ELSE 0 END) as Sales_3M,
-            SUM(CASE WHEN `Invoice Date` >= '{date_12m_ago}' THEN qty ELSE 0 END) as Sales_12M
-        FROM `{TABLE_NAME}`
-        WHERE PartNumber IN {parts_tuple}
-        GROUP BY PartNumber
-    """
-    trend_info = pd.read_sql(trend_query, conn)
-    
-    # Calculate Trend Ratio & Category
-    trend_info["Sales_12M_Adj"] = trend_info["Sales_12M"].replace(0, 1) # Prevent Div by Zero
-    trend_info["Trend_Ratio"] = trend_info["Sales_3M"] / (trend_info["Sales_12M_Adj"] / 4) # Annualized comparison
-    trend_info["Trend"] = trend_info["Trend_Ratio"].apply(calculate_trend_category)
-    
-    # 3. Fetch Branch Data based on the selected Date Filter
-    # NOTE: Assuming branch names are in the 'Name' or 'Area' column. Using 'Name' based on typical schema.
-    branch_query = f"""
-        SELECT 
-            PartNumber,
-            Name as Branch,
-            SUM(qty) as Total_Sales_Qty,
-            COUNT(`InvoiceNumber`) as Sales_Frequency
-        FROM `{TABLE_NAME}`
-        WHERE PartNumber IN {parts_tuple}
-        AND `Invoice Date` BETWEEN '{start_date}' AND '{end_date}'
-        GROUP BY PartNumber, Name
-    """
-    branch_info = pd.read_sql(branch_query, conn)
-    
-    # --- MERGING ALL DATA ---
-    results = pd.merge(valid_inputs, base_info, on="PartNumber", how="left")
-    results = pd.merge(results, trend_info[["PartNumber", "Trend"]], on="PartNumber", how="left")
-    
-    # Pivot Branch Data to create columns for each location
-    if not branch_info.empty:
-        # Filter only for the target branches
-        branch_filtered = branch_info[branch_info["Branch"].isin(TARGET_BRANCHES)]
-        
-        # Pivot Qty
-        pivot_qty = branch_filtered.pivot(index="PartNumber", columns="Branch", values="Total_Sales_Qty").fillna(0)
-        pivot_qty = pivot_qty.add_suffix(" Qty")
-        
-        # Pivot Freq
-        pivot_freq = branch_filtered.pivot(index="PartNumber", columns="Branch", values="Sales_Frequency").fillna(0)
-        pivot_freq = pivot_freq.add_suffix(" Freq")
-        
-        # Merge pivoted data
-        results = pd.merge(results, pivot_qty, on="PartNumber", how="left").fillna(0)
-        results = pd.merge(results, pivot_freq, on="PartNumber", how="left").fillna(0)
-        
-        # Calculate Grand Totals
-        qty_cols = [c for c in results.columns if "Qty" in c and c != "Order Qty"]
-        freq_cols = [c for c in results.columns if "Freq" in c]
-        
-        results["Total Branch Qty"] = results[qty_cols].sum(axis=1)
-        results["Total Branch Freq"] = results[freq_cols].sum(axis=1)
-        
-    else:
-        st.warning(f"No sales data found for the selected date range ({start_date} to {end_date}).")
-    
-    # Cleanup and rename for display
-    results.rename(columns={"Unit_Cost": "Unit Cost", "Product_Code": "Product Code"}, inplace=True)
-    
-    # Render Output Table with Colored Trends
-    st.dataframe(
-        results.style.map(style_trend, subset=["Trend"]), 
+    edited_df = st.data_editor(
+        st.session_state.input_grid, 
+        num_rows="dynamic",
         use_container_width=True,
-        hide_index=True
+        key="editor"
     )
-    
-conn.close()
-import pandas as pd
-from datetime import datetime
+with col2:
+    st.button("Clear List", on_click=clear_list, use_container_width=True)
 
-def get_max_date(conn):
-    query = f"SELECT MAX(`Invoice Date`) FROM `{TABLE_NAME}`"
+# 3. Processing and Output
+if st.button("Analyze Parts", type="primary"):
+    df = st.session_state.master_df
     
-    try:
-        # This is where it's currently crashing
-        max_date = pd.read_sql(query, conn).iloc[0, 0]
-    except Exception as e:
-        # This will print the exact reason to your Streamlit logs
-        print(f"CRITICAL SQL ERROR: {e}")
-        return datetime.today() # Fallback to prevent a full app crash
-
-    if not pd.notna(max_date) or not max_date: 
-        return datetime.today()
+    # Filter valid inputs
+    query_parts = edited_df[edited_df["PartNumber"].str.strip() != ""]
+    
+    if query_parts.empty:
+        st.warning("Please enter at least one valid Part Number.")
+    else:
+        results = []
+        # Areas of interest
+        target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
         
-    try:
-        return pd.to_datetime(max_date)
-    except:
-        return datetime.today()
+        # Calculate time cutoffs for trend
+        trend_12m_start = max_date - relativedelta(months=12)
+        trend_3m_start = max_date - relativedelta(months=3)
+        
+        # Filter DB based on user selected global date range
+        mask_global = (df['Invoice Date'] >= start_date) & (df['Invoice Date'] <= end_date)
+        df_filtered = df.loc[mask_global]
+
+        for index, row in query_parts.iterrows():
+            p_num = str(row['PartNumber']).strip()
+            order_qty = row['Order Qty']
+            
+            # Extract Part Data
+            part_data = df[df['PartNumber'] == p_num]
+            part_data_filtered = df_filtered[df_filtered['PartNumber'] == p_num]
+            
+            if part_data.empty:
+                results.append({"Part Number": p_num, "Description": "Not Found", "Order Qty": order_qty})
+                continue
+                
+            # Static Details (take first instance)
+            desc = part_data['Description'].iloc[0]
+            prod_code = part_data['Product_Code'].iloc[0]
+            unit_cost = part_data['Cost'].iloc[0]
+            
+            # Trend Calculation (Always uses last 12 and last 3 months from dataset's max date)
+            qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum()
+            qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum()
+            
+            trend = 0
+            if qty_12m > 0:
+                trend = round(qty_3m / qty_12m, 2)
+            
+            # Area Metrics calculation based on the globally filtered timeframe
+            row_result = {
+                "Part Number": p_num,
+                "Description": desc,
+                "Product Code": prod_code,
+                "Order Qty": order_qty,
+                "Unit Cost": unit_cost,
+                "Trend": trend
+            }
+            
+            total_sales_qty = part_data_filtered['qty'].sum()
+            total_freq = part_data_filtered['InvoiceNumber'].nunique() # Unique invoices = frequency
+            
+            for area in target_areas:
+                area_data = part_data_filtered[part_data_filtered['Area'] == area]
+                row_result[f"{area} Qty"] = area_data['qty'].sum()
+                row_result[f"{area} Freq"] = area_data['InvoiceNumber'].nunique()
+                
+            row_result["Total Sales Qty"] = total_sales_qty
+            row_result["Total Freq"] = total_freq
+            
+            results.append(row_result)
+            
+        final_df = pd.DataFrame(results)
+        
+        st.subheader("2. Analysis Results")
+        
+        # Apply conditional formatting to the Trend column
+        if "Trend" in final_df.columns:
+            styled_df = final_df.style.applymap(color_trend, subset=['Trend'])
+            st.dataframe(styled_df, use_container_width=True)
+        else:
+            st.dataframe(final_df, use_container_width=True)
