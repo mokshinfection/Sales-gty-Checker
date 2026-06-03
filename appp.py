@@ -13,26 +13,19 @@ GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/ma
 @st.cache_data(ttl=3600)
 def load_fast_data():
     try:
-        # Cache-buster: Forces GitHub to give us the absolute newest file, not a cached one
         bust_url = f"{GITHUB_PARQUET_URL}?v={int(time.time())}"
         df = pd.read_parquet(bust_url)
         
-        # Aggressively strip spaces, hidden newlines, and quotes from column names
         df.columns = df.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
         
-        # --- DYNAMIC DATE FINDER ---
         if 'Invoice Date' not in df.columns:
-            # Hunt for any column that has the word "date" in it (case-insensitive)
             possible_cols = [col for col in df.columns if 'date' in col.lower()]
             if possible_cols:
-                actual_date_col = possible_cols[0] # Grab the first match
+                actual_date_col = possible_cols[0]
                 df.rename(columns={actual_date_col: 'Invoice Date'}, inplace=True)
-                st.toast(f"Auto-renamed column '{actual_date_col}' to 'Invoice Date'")
             else:
-                # If it absolutely cannot find a date column, print the columns to the screen
                 st.error(f"CRITICAL ERROR: No date column found! Columns: {df.columns.tolist()}")
                 
-        # Convert to datetime
         if 'Invoice Date' in df.columns:
             df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
             
@@ -50,23 +43,12 @@ if 'input_grid' not in st.session_state:
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
 
 # --- HELPER FUNCTIONS ---
-def color_trend(val):
-    if pd.isna(val) or val == "":
-        return ""
-    try:
-        val_float = float(val)
-        if val_float < 0.7:
-            return 'background-color: #ffcccc; color: black;'
-        elif 0.7 <= val_float <= 1.14:
-            return 'background-color: #ffffcc; color: black;'
-        elif val_float >= 1.15:
-            return 'background-color: #ccffcc; color: black;'
-    except:
-        return ""
-    return ""
-
 def clear_list():
+    # 1. Clear the underlying data
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
+    # 2. Delete the widget's internal memory so the UI actually resets
+    if 'editor' in st.session_state:
+        del st.session_state['editor']
 
 # --- UI LAYOUT ---
 st.title("📦 Parts Order & Sales Analysis")
@@ -160,12 +142,25 @@ if st.button("Analyze Parts", type="primary"):
                     
                 desc = part_data['Description'].iloc[0] if 'Description' in part_data.columns else "N/A"
                 prod_code = part_data['Product_Code'].iloc[0] if 'Product_Code' in part_data.columns else "N/A"
-                unit_cost = part_data['Cost'].iloc[0] if 'Cost' in part_data.columns else 0
+                
+                # --- NEW UNIT COST LOGIC ---
+                total_part_cost = part_data['Cost'].sum() if 'Cost' in part_data.columns else 0
+                total_part_qty = part_data['qty'].sum() if 'qty' in part_data.columns else 0
+                unit_cost = int(total_part_cost / total_part_qty) if total_part_qty > 0 else 0
                 
                 qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
                 qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
                 
-                trend = round(qty_3m / qty_12m, 2) if qty_12m > 0 else 0
+                # --- NEW TREND ARROW LOGIC ---
+                trend_ratio = (qty_3m / qty_12m) if qty_12m > 0 else 0
+                if qty_12m == 0:
+                    trend_display = "➖ No Data"
+                elif trend_ratio < 0.7:
+                    trend_display = "⬇️ Down"
+                elif trend_ratio <= 1.14:
+                    trend_display = "➡️ Moderate"
+                else:
+                    trend_display = "⬆️ Up"
                 
                 row_result = {
                     "Part Number": p_num,
@@ -173,7 +168,7 @@ if st.button("Analyze Parts", type="primary"):
                     "Product Code": prod_code,
                     "Order Qty": order_qty,
                     "Unit Cost": unit_cost,
-                    "Trend": trend
+                    "Trend": trend_display
                 }
                 
                 total_sales_qty = part_data_filtered['qty'].sum() if 'qty' in part_data_filtered.columns else 0
@@ -195,9 +190,4 @@ if st.button("Analyze Parts", type="primary"):
                 
             final_df = pd.DataFrame(results)
             st.subheader("2. Analysis Results")
-            
-            if "Trend" in final_df.columns:
-                styled_df = final_df.style.map(color_trend, subset=['Trend'])
-                st.dataframe(styled_df, use_container_width=True)
-            else:
-                st.dataframe(final_df, use_container_width=True)
+            st.dataframe(final_df, use_container_width=True)
