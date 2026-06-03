@@ -1,4 +1,1 @@
-streamlit
-pandas
-openpyxl
-py7zr
+streamlit pandas sqlite3 py7zr requests
