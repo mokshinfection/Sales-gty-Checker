@@ -216,3 +216,26 @@ if st.button("🚀 Analyze Parts", type="primary") and not valid_inputs.empty:
     )
     
 conn.close()
+def get_max_date(conn):
+    """Gets the most recent Invoice Date from the DB to calculate trends against."""
+    
+    # --- DEBUGGING SNIPPET ---
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    tables = cursor.fetchall()
+    print(f"DEBUG: Tables found in database: {tables}")
+    # -------------------------
+
+    query = f"SELECT MAX(`Invoice Date`) FROM `{TABLE_NAME}`"
+    
+    try:
+        max_date = pd.read_sql(query, conn).iloc[0, 0]
+    except Exception as e:
+        print(f"DEBUG: Query failed with error: {e}")
+        return datetime.today() # Fail gracefully so the app doesn't crash
+
+    if not max_date: return datetime.today()
+    try:
+        return pd.to_datetime(max_date)
+    except:
+        return datetime.today()
