@@ -96,7 +96,6 @@ with st.sidebar:
             header_idx = 0
             for idx, row in preview_df.iterrows():
                 row_str = [str(x).strip().lower() for x in row.values]
-                # Look for our key columns to identify the true header row
                 if 'part no' in row_str or 'stock' in row_str or 'main dealer-1' in row_str:
                     header_idx = idx
                     break
@@ -168,20 +167,16 @@ if st.button("Analyze Parts", type="primary"):
     # --- STRICTER STOCK COLUMN DETECTION ---
     stock_part_col, stock_qty_col, stock_dealer_col = None, None, None
     if has_stock:
-        # 1. Find Part Number
         stock_part_col = next((c for c in sdf.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), None)
         if not stock_part_col:
             stock_part_col = next((c for c in sdf.columns if 'part' in c.lower()), None)
             
-        # 2. Find Stock/Quantity
         stock_qty_col = next((c for c in sdf.columns if c.strip().lower() == 'stock'), None)
         if not stock_qty_col:
             stock_qty_col = next((c for c in sdf.columns if 'stock' in c.lower() or 'qty' in c.lower()), None)
             
-        # 3. Find Dealer Area (Crucial: Avoid 'DealerId' grabbing by mistake)
         stock_dealer_col = next((c for c in sdf.columns if 'main dealer' in c.lower()), None)
         if not stock_dealer_col:
-            # Fallback: look for dealer but explicitly reject 'id', or look for 'location'
             stock_dealer_col = next((c for c in sdf.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None)
         
         if not (stock_part_col and stock_qty_col and stock_dealer_col):
@@ -191,168 +186,180 @@ if st.button("Analyze Parts", type="primary"):
     if df.empty:
         st.error("The base sales database is currently empty. Please verify your source file.")
     else:
-        # Sales Area Override Logic
-        dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
-        if dealer_col and 'Area' in df.columns:
-            target_dealers = ['693605', '693606', '693608']
-            mask_dealers = df[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
-            df.loc[mask_dealers, 'Area'] = 'Neyveli'
-
-        query_parts = edited_df[edited_df["PartNumber"].astype(str).str.strip() != ""]
-        
-        if query_parts.empty:
-            st.warning("Please enter at least one valid Part Number.")
-        else:
-            results = []
-            target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kothagudem"] 
+        # --- SPEED OPTIMIZATION: PRE-CLEANING DATA ONCE OUTSIDE THE LOOP ---
+        with st.spinner("Optimizing and scanning database..."):
+            # 1. Pre-clean Sales Database Strings
+            df['SearchPart'] = df['PartNumber'].astype(str).str.strip().str.upper()
             
-            trend_12m_start = max_date - relativedelta(months=12)
-            trend_3m_start = max_date - relativedelta(months=3)
+            # Sales Area Override Logic (Optimized)
+            dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
+            if dealer_col and 'Area' in df.columns:
+                target_dealers = ['693605', '693606', '693608']
+                mask_dealers = df[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
+                df.loc[mask_dealers, 'Area'] = 'Neyveli'
             
+            # Pre-filter Date limits once
             mask_global = (df['Invoice Date'] >= start_date) & (df['Invoice Date'] <= end_date)
             df_filtered = df.loc[mask_global]
 
-            for index, row in query_parts.iterrows():
-                p_num = str(row['PartNumber']).strip()
-                p_num_clean = p_num.upper()
-                
-                try:
-                    order_qty = int(float(row['Order Qty'])) if str(row['Order Qty']).strip() else 0
-                except:
-                    order_qty = 0
-                
-                # --- 1. SALES LOGIC ---
-                part_data = df[df['PartNumber'].astype(str).str.upper() == p_num_clean]
-                part_data_filtered = df_filtered[df_filtered['PartNumber'].astype(str).str.upper() == p_num_clean]
-                
-                if part_data.empty:
-                    desc = "Not Found"
-                    prod_code = "N/A"
-                    unit_cost = 0
-                    trend_display = "➖ No Data"
-                    total_sales_qty = 0
-                    total_freq = 0
-                else:
-                    desc = part_data['Description'].iloc[0] if 'Description' in part_data.columns else "N/A"
-                    prod_code = part_data['Product_Code'].iloc[0] if 'Product_Code' in part_data.columns else "N/A"
-                    
-                    total_part_cost = part_data['Cost'].sum() if 'Cost' in part_data.columns else 0
-                    total_part_qty = part_data['qty'].sum() if 'qty' in part_data.columns else 0
-                    unit_cost = int(total_part_cost / total_part_qty) if total_part_qty > 0 else 0
-                    
-                    qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
-                    qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
-                    
-                    avg_12m = qty_12m / 12
-                    avg_3m = qty_3m / 3
-                    trend_ratio = (avg_3m / avg_12m) if avg_12m > 0 else 0
-                    
-                    if avg_12m == 0:
-                        trend_display = "➖ No Data"
-                    elif trend_ratio < 0.7:
-                        trend_display = "⬇️ Down"
-                    elif trend_ratio <= 1.14:
-                        trend_display = "➡️ Moderate"
-                    else:
-                        trend_display = "⬆️ Up"
-                        
-                    total_sales_qty = int(part_data_filtered['qty'].sum()) if 'qty' in part_data_filtered.columns else 0
-                    total_freq = int(part_data_filtered['InvoiceNumber'].nunique()) if 'InvoiceNumber' in part_data_filtered.columns else 0
+            # 2. Pre-clean Stock Database Strings
+            if has_stock:
+                sdf['SearchPart'] = sdf[stock_part_col].astype(str).str.strip().str.upper()
+                sdf['SearchDealer'] = sdf[stock_dealer_col].astype(str).str.strip().str.lower()
+                sdf['NumericQty'] = pd.to_numeric(sdf[stock_qty_col], errors='coerce').fillna(0)
+            
+            # ------------------------------------------------------------------
 
-                row_result = {
-                    "Part Number": p_num,
-                    "Description": desc,
-                    "Product Code": prod_code,
-                    "Order Qty": order_qty,
-                    "Unit Cost": unit_cost,
-                    "Trend": trend_display
-                }
+            query_parts = edited_df[edited_df["PartNumber"].astype(str).str.strip() != ""]
+            
+            if query_parts.empty:
+                st.warning("Please enter at least one valid Part Number.")
+            else:
+                results = []
+                target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kothagudem"] 
                 
-                # --- 2. STOCK LOGIC ---
-                stock_matches = pd.DataFrame()
-                if has_stock:
-                    stock_matches = sdf[sdf[stock_part_col].astype(str).str.strip().str.upper().str.endswith(p_num_clean)]
+                trend_12m_start = max_date - relativedelta(months=12)
+                trend_3m_start = max_date - relativedelta(months=3)
                 
-                # --- 3. MERGE AREA METRICS ---
-                for area in target_areas:
-                    # Sales logic per area
-                    if not part_data_filtered.empty and 'Area' in part_data_filtered.columns:
-                        area_sales = part_data_filtered[part_data_filtered['Area'] == area]
-                        row_result[f"{area} Sales Qty"] = int(area_sales['qty'].sum()) if 'qty' in area_sales.columns else 0
-                        row_result[f"{area} Freq"] = int(area_sales['InvoiceNumber'].nunique()) if 'InvoiceNumber' in area_sales.columns else 0
+                for index, row in query_parts.iterrows():
+                    p_num = str(row['PartNumber']).strip()
+                    p_num_clean = p_num.upper()
+                    
+                    try:
+                        order_qty = int(float(row['Order Qty'])) if str(row['Order Qty']).strip() else 0
+                    except:
+                        order_qty = 0
+                    
+                    # --- 1. FAST SALES LOGIC (Using Pre-Cleaned Columns) ---
+                    part_data = df[df['SearchPart'] == p_num_clean]
+                    part_data_filtered = df_filtered[df_filtered['SearchPart'] == p_num_clean]
+                    
+                    if part_data.empty:
+                        desc = "Not Found"
+                        prod_code = "N/A"
+                        unit_cost = 0
+                        trend_display = "➖ No Data"
+                        total_sales_qty = 0
+                        total_freq = 0
                     else:
-                        row_result[f"{area} Sales Qty"] = 0
-                        row_result[f"{area} Freq"] = 0
+                        desc = part_data['Description'].iloc[0] if 'Description' in part_data.columns else "N/A"
+                        prod_code = part_data['Product_Code'].iloc[0] if 'Product_Code' in part_data.columns else "N/A"
                         
-                    # Stock logic per area
-                    area_stock_val = 0
-                    if has_stock and not stock_matches.empty:
-                        s_dealers = stock_matches[stock_dealer_col].astype(str).str.strip().str.lower()
+                        total_part_cost = part_data['Cost'].sum() if 'Cost' in part_data.columns else 0
+                        total_part_qty = part_data['qty'].sum() if 'qty' in part_data.columns else 0
+                        unit_cost = int(total_part_cost / total_part_qty) if total_part_qty > 0 else 0
                         
-                        if area.lower() == 'hoskote':
-                            mask_stock_area = s_dealers.isin(['hoskote', 'bangalore'])
+                        qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
+                        qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
+                        
+                        avg_12m = qty_12m / 12
+                        avg_3m = qty_3m / 3
+                        trend_ratio = (avg_3m / avg_12m) if avg_12m > 0 else 0
+                        
+                        if avg_12m == 0:
+                            trend_display = "➖ No Data"
+                        elif trend_ratio < 0.7:
+                            trend_display = "⬇️ Down"
+                        elif trend_ratio <= 1.14:
+                            trend_display = "➡️ Moderate"
                         else:
-                            mask_stock_area = s_dealers == area.lower()
+                            trend_display = "⬆️ Up"
                             
-                        area_stock_val = pd.to_numeric(stock_matches.loc[mask_stock_area, stock_qty_col], errors='coerce').sum()
-                        
-                    row_result[f"{area} Stock"] = int(area_stock_val)
+                        total_sales_qty = int(part_data_filtered['qty'].sum()) if 'qty' in part_data_filtered.columns else 0
+                        total_freq = int(part_data_filtered['InvoiceNumber'].nunique()) if 'InvoiceNumber' in part_data_filtered.columns else 0
+
+                    row_result = {
+                        "Part Number": p_num,
+                        "Description": desc,
+                        "Product Code": prod_code,
+                        "Order Qty": order_qty,
+                        "Unit Cost": unit_cost,
+                        "Trend": trend_display
+                    }
+                    
+                    # --- 2. FAST STOCK LOGIC (Using Pre-Cleaned Columns) ---
+                    stock_matches = pd.DataFrame()
+                    if has_stock:
+                        stock_matches = sdf[sdf['SearchPart'].str.endswith(p_num_clean)]
+                    
+                    # --- 3. MERGE AREA METRICS ---
+                    for area in target_areas:
+                        # Sales logic per area
+                        if not part_data_filtered.empty and 'Area' in part_data_filtered.columns:
+                            area_sales = part_data_filtered[part_data_filtered['Area'] == area]
+                            row_result[f"{area} Sales Qty"] = int(area_sales['qty'].sum()) if 'qty' in area_sales.columns else 0
+                            row_result[f"{area} Freq"] = int(area_sales['InvoiceNumber'].nunique()) if 'InvoiceNumber' in area_sales.columns else 0
+                        else:
+                            row_result[f"{area} Sales Qty"] = 0
+                            row_result[f"{area} Freq"] = 0
+                            
+                        # Stock logic per area
+                        area_stock_val = 0
+                        if has_stock and not stock_matches.empty:
+                            if area.lower() == 'hoskote':
+                                mask_stock_area = stock_matches['SearchDealer'].isin(['hoskote', 'bangalore'])
+                            else:
+                                mask_stock_area = stock_matches['SearchDealer'] == area.lower()
+                                
+                            area_stock_val = stock_matches.loc[mask_stock_area, 'NumericQty'].sum()
+                            
+                        row_result[f"{area} Stock"] = int(area_stock_val)
+                    
+                    row_result["Total Sales Qty"] = total_sales_qty
+                    row_result["Total Freq"] = total_freq
+                    
+                    results.append(row_result)
+                    
+                final_df = pd.DataFrame(results)
                 
-                row_result["Total Sales Qty"] = total_sales_qty
-                row_result["Total Freq"] = total_freq
+                # Reorder columns to group areas together
+                base_cols = ["Part Number", "Description", "Product Code", "Order Qty", "Unit Cost", "Trend", "Total Sales Qty", "Total Freq"]
+                reordered_cols = base_cols.copy()
+                for area in target_areas:
+                    reordered_cols.extend([f"{area} Stock", f"{area} Sales Qty", f"{area} Freq"])
+                    
+                final_df = final_df[[c for c in reordered_cols if c in final_df.columns]]
                 
-                results.append(row_result)
+                st.subheader("2. Analysis Results")
                 
-            final_df = pd.DataFrame(results)
-            
-            # Reorder columns to group areas together
-            base_cols = ["Part Number", "Description", "Product Code", "Order Qty", "Unit Cost", "Trend", "Total Sales Qty", "Total Freq"]
-            reordered_cols = base_cols.copy()
-            for area in target_areas:
-                reordered_cols.extend([f"{area} Stock", f"{area} Sales Qty", f"{area} Freq"])
+                # --- APPLY EXACT BACKGROUND COLORS & REMOVE DECIMALS ---
+                styled_df = final_df.style.format(precision=0)
                 
-            final_df = final_df[[c for c in reordered_cols if c in final_df.columns]]
-            
-            st.subheader("2. Analysis Results")
-            
-            # --- APPLY EXACT BACKGROUND COLORS & REMOVE DECIMALS ---
-            styled_df = final_df.style.format(precision=0)
-            
-            if "Trend" in final_df.columns:
-                styled_df = styled_df.map(style_trend_text, subset=['Trend'])
+                if "Trend" in final_df.columns:
+                    styled_df = styled_df.map(style_trend_text, subset=['Trend'])
+                    
+                if "Unit Cost" in final_df.columns:
+                    styled_df = styled_df.map(lambda _: 'background-color: #ffcccc; color: black;', subset=['Unit Cost'])
+                    
+                total_cols = [c for c in final_df.columns if c in ["Total Sales Qty", "Total Freq"]]
+                if total_cols:
+                    styled_df = styled_df.map(lambda _: 'background-color: #ccffcc; color: black;', subset=total_cols)
+                    
+                sales_qty_cols = [c for c in final_df.columns if "Sales Qty" in c and c not in ["Total Sales Qty"]]
+                if sales_qty_cols:
+                    styled_df = styled_df.map(lambda _: 'background-color: #ffe6cc; color: black;', subset=sales_qty_cols)
+                    
+                stock_cols = [c for c in final_df.columns if "Stock" in c]
+                if stock_cols:
+                    styled_df = styled_df.map(lambda _: 'background-color: #e6ccff; color: black;', subset=stock_cols)
+                    
+                freq_cols = [c for c in final_df.columns if "Freq" in c and c not in ["Total Freq"]]
+                if freq_cols:
+                    styled_df = styled_df.map(lambda _: 'background-color: #cce5ff; color: black;', subset=freq_cols)
+                    
+                st.dataframe(styled_df, use_container_width=True, hide_index=True)
                 
-            if "Unit Cost" in final_df.columns:
-                styled_df = styled_df.map(lambda _: 'background-color: #ffcccc; color: black;', subset=['Unit Cost'])
+                # --- DOWNLOAD AS EXCEL BUTTON ---
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    styled_df.to_excel(writer, index=False, sheet_name='Sales & Stock Analysis')
                 
-            total_cols = [c for c in final_df.columns if c in ["Total Sales Qty", "Total Freq"]]
-            if total_cols:
-                styled_df = styled_df.map(lambda _: 'background-color: #ccffcc; color: black;', subset=total_cols)
+                download_data = buffer.getvalue()
                 
-            sales_qty_cols = [c for c in final_df.columns if "Sales Qty" in c and c not in ["Total Sales Qty"]]
-            if sales_qty_cols:
-                styled_df = styled_df.map(lambda _: 'background-color: #ffe6cc; color: black;', subset=sales_qty_cols)
-                
-            stock_cols = [c for c in final_df.columns if "Stock" in c]
-            if stock_cols:
-                styled_df = styled_df.map(lambda _: 'background-color: #e6ccff; color: black;', subset=stock_cols)
-                
-            freq_cols = [c for c in final_df.columns if "Freq" in c and c not in ["Total Freq"]]
-            if freq_cols:
-                styled_df = styled_df.map(lambda _: 'background-color: #cce5ff; color: black;', subset=freq_cols)
-                
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
-            
-            # --- DOWNLOAD AS EXCEL BUTTON ---
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                styled_df.to_excel(writer, index=False, sheet_name='Sales & Stock Analysis')
-            
-            download_data = buffer.getvalue()
-            
-            st.download_button(
-                label="📥 Download Results as Excel",
-                data=download_data,
-                file_name=f"Sales_Stock_Analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
+                st.download_button(
+                    label="📥 Download Results as Excel",
+                    data=download_data,
+                    file_name=f"Sales_Stock_Analysis_{datetime.now().strftime('%Y-%m-%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary"
+                )
