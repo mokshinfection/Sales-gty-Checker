@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import time
 import io
+import os
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -9,6 +10,7 @@ from dateutil.relativedelta import relativedelta
 st.set_page_config(layout="wide", page_title="Sales & Stock Qty Checker")
 
 GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
+LOCAL_STOCK_FILE = "stock.parquet"
 
 # --- BULLETPROOF DATA LOADING ---
 @st.cache_data(ttl=3600)
@@ -38,8 +40,17 @@ def load_fast_data():
 # Initialize session states
 if 'master_df' not in st.session_state:
     st.session_state.master_df = load_fast_data()
+
+# --- AUTO-LOAD LOCAL STOCK PARQUET ---
 if 'stock_df' not in st.session_state:
-    st.session_state.stock_df = pd.DataFrame()
+    if os.path.exists(LOCAL_STOCK_FILE):
+        try:
+            st.session_state.stock_df = pd.read_parquet(LOCAL_STOCK_FILE)
+        except:
+            st.session_state.stock_df = pd.DataFrame()
+    else:
+        st.session_state.stock_df = pd.DataFrame()
+
 if 'input_grid' not in st.session_state:
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
 if 'editor_key' not in st.session_state:
@@ -65,26 +76,43 @@ st.title("📦 Parts Order, Sales & Stock Analysis")
 
 # 1. Sidebar - Data Upload & Filters
 with st.sidebar:
+    # --- LATEST DATE DISPLAY ---
+    if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
+        latest_date = st.session_state.master_df['Invoice Date'].max()
+        if pd.notna(latest_date):
+            st.success(f"📅 Latest Sales Data: **{latest_date.strftime('%B %Y')}**")
+    
     st.header("1. Upload Sales Data")
-    uploaded_file = st.file_uploader("Upload CSV to append to sales database", type=['csv'])
+    uploaded_file = st.file_uploader("Upload CSV/Excel to append to sales database", type=['csv', 'xlsx', 'xls'])
     if uploaded_file:
-        new_data = pd.read_csv(uploaded_file)
-        new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
-        
-        for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
-            if variant in new_data.columns and 'Invoice Date' not in new_data.columns:
-                new_data.rename(columns={variant: 'Invoice Date'}, inplace=True)
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                new_data = pd.read_csv(uploaded_file)
+            else:
+                new_data = pd.read_excel(uploaded_file)
                 
-        if 'Invoice Date' in new_data.columns:
-            new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+            new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
             
-        st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
-        st.success("New sales data appended!")
+            for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
+                if variant in new_data.columns and 'Invoice Date' not in new_data.columns:
+                    new_data.rename(columns={variant: 'Invoice Date'}, inplace=True)
+                    
+            if 'Invoice Date' in new_data.columns:
+                new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+                
+            st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
+            st.success("New sales data appended successfully!")
+        except Exception as e:
+            st.error(f"Error loading sales file: {e}")
     
     st.markdown("---")
     
     st.header("2. Upload Stock Data")
-    stock_file = st.file_uploader("Upload current Stock List (CSV/Excel)", type=['csv', 'xlsx'])
+    
+    if not st.session_state.stock_df.empty:
+        st.info("✅ A cached Stock file is currently loaded in the system.")
+        
+    stock_file = st.file_uploader("Upload NEW Stock List to replace old one (CSV/Excel)", type=['csv', 'xlsx'])
     if stock_file:
         try:
             # --- SMART HEADER DETECTION LOGIC ---
@@ -107,12 +135,12 @@ with st.sidebar:
                 stock_data = pd.read_excel(stock_file, header=header_idx)
                 
             stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
+            
+            # --- OVERWRITE AND SAVE TO PARQUET ---
+            stock_data.to_parquet(LOCAL_STOCK_FILE, index=False)
             st.session_state.stock_df = stock_data
             
-            if header_idx > 0:
-                st.success(f"Stock list loaded! (Skipped {header_idx} rows of metadata)")
-            else:
-                st.success("Stock list loaded successfully!")
+            st.success("New stock list loaded and cached as Parquet!")
                 
         except Exception as e:
             st.error(f"Error loading stock file: {e}")
@@ -199,7 +227,7 @@ if st.button("Analyze Parts", type="primary"):
                 df.loc[mask_dealers, 'Area'] = 'Neyveli'
             
             # Pre-filter Date limits once
-            mask_global = (df['Invoice Date'] >= start_date) & (df['Invoice Date'] <= end_date)
+            mask_global = (df['Invoice Date'] >= pd.to_datetime(start_date)) & (df['Invoice Date'] <= pd.to_datetime(end_date))
             df_filtered = df.loc[mask_global]
 
             # 2. Pre-clean Stock Database Strings
