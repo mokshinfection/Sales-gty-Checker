@@ -121,18 +121,33 @@ with col2:
 
 # 3. Processing and Output
 if st.button("Analyze Parts", type="primary"):
-    df = st.session_state.master_df
+    # Create a copy so we don't permanently modify the master session state
+    df = st.session_state.master_df.copy() 
     
     if df.empty:
         st.error("The base database is currently empty. Please verify your source file.")
     else:
+        # =====================================================================
+        # NEW LOGIC: Override Area to Neyveli for specific Dealer IDs
+        # Automatically detect the Dealer column (e.g., 'Dealer ID', 'DealerCode')
+        dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
+        if dealer_col and 'Area' in df.columns:
+            target_dealers = ['693605', '693606', '693608']
+            # Safe matching: convert to string, strip spaces, remove ".0" if interpreted as float
+            mask_dealers = df[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
+            df.loc[mask_dealers, 'Area'] = 'Neyveli'
+        # =====================================================================
+
         query_parts = edited_df[edited_df["PartNumber"].astype(str).str.strip() != ""]
         
         if query_parts.empty:
             st.warning("Please enter at least one valid Part Number.")
         else:
             results = []
-            target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kotagudem"]
+            # =====================================================================
+            # UPDATED: Changed 'Kotagudem' to 'Kothagudem'
+            target_areas = ["Hoskote", "Nellore", "Neyveli", "Ramagundam", "Kothagudem"] 
+            # =====================================================================
             
             trend_12m_start = max_date - relativedelta(months=12)
             trend_3m_start = max_date - relativedelta(months=3)
@@ -203,7 +218,7 @@ if st.button("Analyze Parts", type="primary"):
                     else:
                         row_result[f"{area} Qty"] = 0
                         row_result[f"{area} Freq"] = 0
-                    
+                
                 row_result["Total Sales Qty"] = total_sales_qty
                 row_result["Total Freq"] = total_freq
                 
