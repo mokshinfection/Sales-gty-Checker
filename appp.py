@@ -87,14 +87,36 @@ with st.sidebar:
     stock_file = st.file_uploader("Upload current Stock List (CSV/Excel)", type=['csv', 'xlsx'])
     if stock_file:
         try:
+            # --- SMART HEADER DETECTION LOGIC ---
+            # 1. Preview the first 15 rows without headers to find where the actual table starts
             if stock_file.name.endswith('.csv'):
-                stock_data = pd.read_csv(stock_file)
+                preview_df = pd.read_csv(stock_file, header=None, nrows=15)
             else:
-                stock_data = pd.read_excel(stock_file)
+                preview_df = pd.read_excel(stock_file, header=None, nrows=15)
+                
+            header_idx = 0
+            for idx, row in preview_df.iterrows():
+                # Clean the row to check for our known column names
+                row_str = [str(x).strip().lower() for x in row.values]
+                if 'part no' in row_str or 'stock' in row_str or 'main dealer-1' in row_str:
+                    header_idx = idx
+                    break
+                    
+            # 2. Reset the file pointer and read properly using the found header index
+            stock_file.seek(0)
+            if stock_file.name.endswith('.csv'):
+                stock_data = pd.read_csv(stock_file, header=header_idx)
+            else:
+                stock_data = pd.read_excel(stock_file, header=header_idx)
                 
             stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
             st.session_state.stock_df = stock_data
-            st.success("Stock list loaded successfully!")
+            
+            if header_idx > 0:
+                st.success(f"Stock list loaded! (Skipped {header_idx} rows of metadata)")
+            else:
+                st.success("Stock list loaded successfully!")
+                
         except Exception as e:
             st.error(f"Error loading stock file: {e}")
 
