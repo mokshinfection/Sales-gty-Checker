@@ -76,7 +76,7 @@ st.title("📦 Parts Order, Sales & Stock Analysis")
 
 # 1. Sidebar - Data Upload & Filters
 with st.sidebar:
-    # --- LATEST DATE DISPLAY ---
+    # --- LATEST SALES DATE DISPLAY ---
     if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
         latest_date = st.session_state.master_df['Invoice Date'].max()
         if pd.notna(latest_date):
@@ -118,6 +118,19 @@ with st.sidebar:
     if not st.session_state.stock_df.empty:
         st.info("✅ A cached Stock file is currently loaded in the system.")
         
+        # --- NEW: LATEST STOCK DATE DISPLAY ---
+        stock_date_cols = [c for c in st.session_state.stock_df.columns if 'date' in c.lower()]
+        max_stock_date = pd.NaT
+        for c in stock_date_cols:
+            parsed_dates = pd.to_datetime(st.session_state.stock_df[c], errors='coerce', dayfirst=True)
+            col_max = parsed_dates.max()
+            if pd.notna(col_max):
+                if pd.isna(max_stock_date) or col_max > max_stock_date:
+                    max_stock_date = col_max
+                    
+        if pd.notna(max_stock_date):
+            st.success(f"📦 Latest Stock Date: **{max_stock_date.strftime('%B %Y')}**")
+        
     stock_file = st.file_uploader("Upload NEW Stock List to replace old one (CSV/Excel)", type=['csv', 'xlsx'])
     if stock_file:
         try:
@@ -150,6 +163,7 @@ with st.sidebar:
             st.session_state.stock_df = stock_data
             
             st.success("New stock list loaded and cached as Parquet!")
+            st.rerun() # Refresh the page immediately to show the new Stock Date
                 
         except Exception as e:
             st.error(f"Error loading stock file: {e}")
