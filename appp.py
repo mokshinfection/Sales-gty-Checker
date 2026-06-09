@@ -76,9 +76,10 @@ st.title("📦 Parts Order, Sales & Stock Analysis")
 
 # 1. Sidebar - Data Upload & Filters
 with st.sidebar:
-    # --- LATEST DATE DISPLAY ---
+    # --- ROBUST LATEST SALES DATE DISPLAY ---
     if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
-        latest_date = st.session_state.master_df['Invoice Date'].max()
+        safe_sales_dates = pd.to_datetime(st.session_state.master_df['Invoice Date'], errors='coerce')
+        latest_date = safe_sales_dates.max()
         if pd.notna(latest_date):
             st.success(f"📅 Latest Sales Data: **{latest_date.strftime('%B %Y')}**")
     
@@ -87,9 +88,9 @@ with st.sidebar:
     if uploaded_file:
         try:
             if uploaded_file.name.endswith('.csv'):
-                new_data = pd.read_csv(uploaded_file, dtype=str) # Force string load
+                new_data = pd.read_csv(uploaded_file, dtype=str) 
             else:
-                new_data = pd.read_excel(uploaded_file, dtype=str) # Force string load
+                new_data = pd.read_excel(uploaded_file, dtype=str) 
                 
             new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
             
@@ -100,7 +101,6 @@ with st.sidebar:
             if 'Invoice Date' in new_data.columns:
                 new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
                 
-            # Convert qty and cost safely to numeric if they exist
             if 'qty' in new_data.columns:
                 new_data['qty'] = pd.to_numeric(new_data['qty'], errors='coerce').fillna(0)
             if 'Cost' in new_data.columns:
@@ -118,38 +118,64 @@ with st.sidebar:
     if not st.session_state.stock_df.empty:
         st.info("✅ A cached Stock file is currently loaded in the system.")
         
+        # --- ROBUST LATEST STOCK DATE DISPLAY ---
+        stock_date_cols = [c for c in st.session_state.stock_df.columns if 'date' in c.lower()]
+        max_stock_date = pd.NaT
+        for c in stock_date_cols:
+            valid_rows = st.session_state.stock_df[c].dropna()
+            if not valid_rows.empty:
+                parsed_dates = pd.to_datetime(valid_rows, errors='coerce', dayfirst=True)
+                col_max = parsed_dates.max()
+                if pd.notna(col_max):
+                    if pd.isna(max_stock_date) or col_max > max_stock_date:
+                        max_stock_date = col_max
+                        
+        if pd.notna(max_stock_date):
+            st.success(f"📦 Latest Stock Date: **{max_stock_date.strftime('%B %Y')}**")
+        
     stock_file = st.file_uploader("Upload NEW Stock List to replace old one (CSV/Excel)", type=['csv', 'xlsx'])
     if stock_file:
         try:
-            # --- SMART HEADER DETECTION LOGIC ---
-            if stock_file.name.endswith('.csv'):
-                preview_df = pd.read_csv(stock_file, header=None, nrows=15)
-            else:
-                preview_df = pd.read_excel(stock_file, header=None, nrows=15)
-                
             header_idx = 0
-            for idx, row in preview_df.iterrows():
-                row_str = [str(x).strip().lower() for x in row.values]
-                if 'part no' in row_str or 'stock' in row_str or 'main dealer-1' in row_str:
-                    header_idx = idx
-                    break
-                    
-            stock_file.seek(0)
-            if stock_file.name.endswith('.csv'):
-                stock_data = pd.read_csv(stock_file, header=header_idx)
-            else:
-                stock_data = pd.read_excel(stock_file, header=header_idx)
-                
-            # --- THE FIX: FORCE EVERYTHING TO TEXT ---
-            stock_data = stock_data.astype(str)
             
+            # --- THE FIX: BULLETPROOF TEXT SCANNER FOR CSVs ---
+            if stock_file.name.endswith('.csv'):
+                stock_file.seek(0)
+                # Read first 25 lines as plain text to avoid pandas Tokenizing crashing
+                lines = stock_file.readlines()[:25]
+                for idx, line in enumerate(lines):
+                    try:
+                        decoded_row = line.decode('utf-8', errors='ignore').lower()
+                    except:
+                        decoded_row = str(line).lower()
+                        
+                    if 'part no' in decoded_row or 'stock' in decoded_row or 'main dealer' in decoded_row:
+                        header_idx = idx
+                        break
+                
+                # Now that we know exactly where the header is, safely pass it to pandas
+                stock_file.seek(0)
+                stock_data = pd.read_csv(stock_file, header=header_idx, dtype=str)
+                
+            else:
+                # Excel handles weird grid sizes fine natively
+                preview_df = pd.read_excel(stock_file, header=None, nrows=25)
+                for idx, row in preview_df.iterrows():
+                    row_str = [str(x).strip().lower() for x in row.values]
+                    if 'part no' in row_str or 'stock' in row_str or 'main dealer-1' in row_str or 'main dealer' in row_str:
+                        header_idx = idx
+                        break
+                stock_file.seek(0)
+                stock_data = pd.read_excel(stock_file, header=header_idx, dtype=str)
+                
+            stock_data = stock_data.astype(str)
             stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
             
-            # --- OVERWRITE AND SAVE TO PARQUET ---
             stock_data.to_parquet(LOCAL_STOCK_FILE, index=False)
             st.session_state.stock_df = stock_data
             
             st.success("New stock list loaded and cached as Parquet!")
+            st.rerun()
                 
         except Exception as e:
             st.error(f"Error loading stock file: {e}")
@@ -160,7 +186,7 @@ with st.sidebar:
     filter_option = st.selectbox("Select Date Range", ["Last 3 Months", "Last 6 Months", "Last 12 Months", "Custom Range"])
     
     if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
-        max_date = st.session_state.master_df['Invoice Date'].max()
+        max_date = pd.to_datetime(st.session_state.master_df['Invoice Date'], errors='coerce').max()
         if pd.isna(max_date): 
             max_date = datetime.today()
     else:
@@ -201,7 +227,6 @@ if st.button("Analyze Parts", type="primary"):
     
     has_stock = not sdf.empty
     
-    # --- STRICTER STOCK COLUMN DETECTION ---
     stock_part_col, stock_qty_col, stock_dealer_col = None, None, None
     if has_stock:
         stock_part_col = next((c for c in sdf.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), None)
@@ -223,30 +248,24 @@ if st.button("Analyze Parts", type="primary"):
     if df.empty:
         st.error("The base sales database is currently empty. Please verify your source file.")
     else:
-        # --- SPEED OPTIMIZATION: PRE-CLEANING DATA ONCE OUTSIDE THE LOOP ---
         with st.spinner("Optimizing and scanning database..."):
-            # 1. Pre-clean Sales Database Strings
             df['SearchPart'] = df['PartNumber'].astype(str).str.strip().str.upper()
             
-            # Sales Area Override Logic (Optimized)
             dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
             if dealer_col and 'Area' in df.columns:
                 target_dealers = ['693605', '693606', '693608']
                 mask_dealers = df[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
                 df.loc[mask_dealers, 'Area'] = 'Neyveli'
             
-            # Pre-filter Date limits once
-            mask_global = (df['Invoice Date'] >= pd.to_datetime(start_date)) & (df['Invoice Date'] <= pd.to_datetime(end_date))
+            mask_global = (pd.to_datetime(df['Invoice Date'], errors='coerce') >= pd.to_datetime(start_date)) & \
+                          (pd.to_datetime(df['Invoice Date'], errors='coerce') <= pd.to_datetime(end_date))
             df_filtered = df.loc[mask_global]
 
-            # 2. Pre-clean Stock Database Strings
             if has_stock:
                 sdf['SearchPart'] = sdf[stock_part_col].astype(str).str.strip().str.upper()
                 sdf['SearchDealer'] = sdf[stock_dealer_col].astype(str).str.strip().str.lower()
                 sdf['NumericQty'] = pd.to_numeric(sdf[stock_qty_col], errors='coerce').fillna(0)
             
-            # ------------------------------------------------------------------
-
             query_parts = edited_df[edited_df["PartNumber"].astype(str).str.strip() != ""]
             
             if query_parts.empty:
@@ -258,6 +277,8 @@ if st.button("Analyze Parts", type="primary"):
                 trend_12m_start = max_date - relativedelta(months=12)
                 trend_3m_start = max_date - relativedelta(months=3)
                 
+                safe_base_dates = pd.to_datetime(df['Invoice Date'], errors='coerce')
+                
                 for index, row in query_parts.iterrows():
                     p_num = str(row['PartNumber']).strip()
                     p_num_clean = p_num.upper()
@@ -267,7 +288,6 @@ if st.button("Analyze Parts", type="primary"):
                     except:
                         order_qty = 0
                     
-                    # --- 1. FAST SALES LOGIC (Using Pre-Cleaned Columns) ---
                     part_data = df[df['SearchPart'] == p_num_clean]
                     part_data_filtered = df_filtered[df_filtered['SearchPart'] == p_num_clean]
                     
@@ -286,8 +306,12 @@ if st.button("Analyze Parts", type="primary"):
                         total_part_qty = part_data['qty'].sum() if 'qty' in part_data.columns else 0
                         unit_cost = int(total_part_cost / total_part_qty) if total_part_qty > 0 else 0
                         
-                        qty_12m = part_data[(part_data['Invoice Date'] >= trend_12m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
-                        qty_3m = part_data[(part_data['Invoice Date'] >= trend_3m_start) & (part_data['Invoice Date'] <= max_date)]['qty'].sum() if 'qty' in part_data.columns else 0
+                        part_dates = safe_base_dates[part_data.index]
+                        mask_12m = (part_dates >= trend_12m_start) & (part_dates <= max_date)
+                        mask_3m = (part_dates >= trend_3m_start) & (part_dates <= max_date)
+                        
+                        qty_12m = part_data.loc[mask_12m, 'qty'].sum() if 'qty' in part_data.columns else 0
+                        qty_3m = part_data.loc[mask_3m, 'qty'].sum() if 'qty' in part_data.columns else 0
                         
                         avg_12m = qty_12m / 12
                         avg_3m = qty_3m / 3
@@ -314,14 +338,11 @@ if st.button("Analyze Parts", type="primary"):
                         "Trend": trend_display
                     }
                     
-                    # --- 2. FAST STOCK LOGIC (Using Pre-Cleaned Columns) ---
                     stock_matches = pd.DataFrame()
                     if has_stock:
                         stock_matches = sdf[sdf['SearchPart'].str.endswith(p_num_clean)]
                     
-                    # --- 3. MERGE AREA METRICS ---
                     for area in target_areas:
-                        # Sales logic per area
                         if not part_data_filtered.empty and 'Area' in part_data_filtered.columns:
                             area_sales = part_data_filtered[part_data_filtered['Area'] == area]
                             row_result[f"{area} Sales Qty"] = int(area_sales['qty'].sum()) if 'qty' in area_sales.columns else 0
@@ -330,7 +351,6 @@ if st.button("Analyze Parts", type="primary"):
                             row_result[f"{area} Sales Qty"] = 0
                             row_result[f"{area} Freq"] = 0
                             
-                        # Stock logic per area
                         area_stock_val = 0
                         if has_stock and not stock_matches.empty:
                             if area.lower() == 'hoskote':
@@ -349,7 +369,6 @@ if st.button("Analyze Parts", type="primary"):
                     
                 final_df = pd.DataFrame(results)
                 
-                # Reorder columns to group areas together
                 base_cols = ["Part Number", "Description", "Product Code", "Order Qty", "Unit Cost", "Trend", "Total Sales Qty", "Total Freq"]
                 reordered_cols = base_cols.copy()
                 for area in target_areas:
@@ -359,7 +378,6 @@ if st.button("Analyze Parts", type="primary"):
                 
                 st.subheader("2. Analysis Results")
                 
-                # --- APPLY EXACT BACKGROUND COLORS & REMOVE DECIMALS ---
                 styled_df = final_df.style.format(precision=0)
                 
                 if "Trend" in final_df.columns:
@@ -386,7 +404,6 @@ if st.button("Analyze Parts", type="primary"):
                     
                 st.dataframe(styled_df, use_container_width=True, hide_index=True)
                 
-                # --- DOWNLOAD AS EXCEL BUTTON ---
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     styled_df.to_excel(writer, index=False, sheet_name='Sales & Stock Analysis')
