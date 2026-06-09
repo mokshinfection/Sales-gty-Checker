@@ -87,9 +87,9 @@ with st.sidebar:
     if uploaded_file:
         try:
             if uploaded_file.name.endswith('.csv'):
-                new_data = pd.read_csv(uploaded_file)
+                new_data = pd.read_csv(uploaded_file, dtype=str) # Force string load
             else:
-                new_data = pd.read_excel(uploaded_file)
+                new_data = pd.read_excel(uploaded_file, dtype=str) # Force string load
                 
             new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
             
@@ -99,6 +99,12 @@ with st.sidebar:
                     
             if 'Invoice Date' in new_data.columns:
                 new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+                
+            # Convert qty and cost safely to numeric if they exist
+            if 'qty' in new_data.columns:
+                new_data['qty'] = pd.to_numeric(new_data['qty'], errors='coerce').fillna(0)
+            if 'Cost' in new_data.columns:
+                new_data['Cost'] = pd.to_numeric(new_data['Cost'], errors='coerce').fillna(0)
                 
             st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
             st.success("New sales data appended successfully!")
@@ -134,6 +140,9 @@ with st.sidebar:
             else:
                 stock_data = pd.read_excel(stock_file, header=header_idx)
                 
+            # --- THE FIX: FORCE EVERYTHING TO TEXT ---
+            stock_data = stock_data.astype(str)
+            
             stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
             
             # --- OVERWRITE AND SAVE TO PARQUET ---
