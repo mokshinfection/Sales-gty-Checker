@@ -88,7 +88,6 @@ with st.sidebar:
     if stock_file:
         try:
             # --- SMART HEADER DETECTION LOGIC ---
-            # 1. Preview the first 15 rows without headers to find where the actual table starts
             if stock_file.name.endswith('.csv'):
                 preview_df = pd.read_csv(stock_file, header=None, nrows=15)
             else:
@@ -96,13 +95,12 @@ with st.sidebar:
                 
             header_idx = 0
             for idx, row in preview_df.iterrows():
-                # Clean the row to check for our known column names
                 row_str = [str(x).strip().lower() for x in row.values]
+                # Look for our key columns to identify the true header row
                 if 'part no' in row_str or 'stock' in row_str or 'main dealer-1' in row_str:
                     header_idx = idx
                     break
                     
-            # 2. Reset the file pointer and read properly using the found header index
             stock_file.seek(0)
             if stock_file.name.endswith('.csv'):
                 stock_data = pd.read_csv(stock_file, header=header_idx)
@@ -167,15 +165,27 @@ if st.button("Analyze Parts", type="primary"):
     
     has_stock = not sdf.empty
     
-    # Try to identify Stock File columns dynamically
+    # --- STRICTER STOCK COLUMN DETECTION ---
     stock_part_col, stock_qty_col, stock_dealer_col = None, None, None
     if has_stock:
-        stock_part_col = next((c for c in sdf.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), next((c for c in sdf.columns if 'part' in c.lower()), None))
-        stock_qty_col = next((c for c in sdf.columns if 'stock' in c.lower() or 'qty' in c.lower()), None)
-        stock_dealer_col = next((c for c in sdf.columns if 'dealer' in c.lower() or 'location' in c.lower()), None)
+        # 1. Find Part Number
+        stock_part_col = next((c for c in sdf.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), None)
+        if not stock_part_col:
+            stock_part_col = next((c for c in sdf.columns if 'part' in c.lower()), None)
+            
+        # 2. Find Stock/Quantity
+        stock_qty_col = next((c for c in sdf.columns if c.strip().lower() == 'stock'), None)
+        if not stock_qty_col:
+            stock_qty_col = next((c for c in sdf.columns if 'stock' in c.lower() or 'qty' in c.lower()), None)
+            
+        # 3. Find Dealer Area (Crucial: Avoid 'DealerId' grabbing by mistake)
+        stock_dealer_col = next((c for c in sdf.columns if 'main dealer' in c.lower()), None)
+        if not stock_dealer_col:
+            # Fallback: look for dealer but explicitly reject 'id', or look for 'location'
+            stock_dealer_col = next((c for c in sdf.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None)
         
         if not (stock_part_col and stock_qty_col and stock_dealer_col):
-            st.warning("Stock File uploaded, but couldn't auto-detect 'Part Number', 'Stock', or 'Main Dealer' columns. Stock checks may be skipped.")
+            st.warning("Stock File uploaded, but couldn't completely detect columns. Stock checks may be skipped.")
             has_stock = False
     
     if df.empty:
@@ -261,7 +271,6 @@ if st.button("Analyze Parts", type="primary"):
                 # --- 2. STOCK LOGIC ---
                 stock_matches = pd.DataFrame()
                 if has_stock:
-                    # Filter stock items ending with the part number (handles VO prefix or pure numbers)
                     stock_matches = sdf[sdf[stock_part_col].astype(str).str.strip().str.upper().str.endswith(p_num_clean)]
                 
                 # --- 3. MERGE AREA METRICS ---
@@ -278,17 +287,13 @@ if st.button("Analyze Parts", type="primary"):
                     # Stock logic per area
                     area_stock_val = 0
                     if has_stock and not stock_matches.empty:
-                        # Clean dealer strings
                         s_dealers = stock_matches[stock_dealer_col].astype(str).str.strip().str.lower()
                         
                         if area.lower() == 'hoskote':
-                            # Hoskote considers both Hoskote and Bangalore
                             mask_stock_area = s_dealers.isin(['hoskote', 'bangalore'])
                         else:
-                            # Direct match for others
                             mask_stock_area = s_dealers == area.lower()
                             
-                        # Sum up the quantities
                         area_stock_val = pd.to_numeric(stock_matches.loc[mask_stock_area, stock_qty_col], errors='coerce').sum()
                         
                     row_result[f"{area} Stock"] = int(area_stock_val)
@@ -300,13 +305,12 @@ if st.button("Analyze Parts", type="primary"):
                 
             final_df = pd.DataFrame(results)
             
-            # Reorder columns to group areas together: [Area] Stock, [Area] Sales Qty, [Area] Freq
+            # Reorder columns to group areas together
             base_cols = ["Part Number", "Description", "Product Code", "Order Qty", "Unit Cost", "Trend", "Total Sales Qty", "Total Freq"]
             reordered_cols = base_cols.copy()
             for area in target_areas:
                 reordered_cols.extend([f"{area} Stock", f"{area} Sales Qty", f"{area} Freq"])
                 
-            # Filter just to be safe if some columns didn't generate properly
             final_df = final_df[[c for c in reordered_cols if c in final_df.columns]]
             
             st.subheader("2. Analysis Results")
@@ -314,35 +318,28 @@ if st.button("Analyze Parts", type="primary"):
             # --- APPLY EXACT BACKGROUND COLORS & REMOVE DECIMALS ---
             styled_df = final_df.style.format(precision=0)
             
-            # 1. Trend
             if "Trend" in final_df.columns:
                 styled_df = styled_df.map(style_trend_text, subset=['Trend'])
                 
-            # 2. Unit Cost (Light Red)
             if "Unit Cost" in final_df.columns:
                 styled_df = styled_df.map(lambda _: 'background-color: #ffcccc; color: black;', subset=['Unit Cost'])
                 
-            # 3. Totals (Light Green)
             total_cols = [c for c in final_df.columns if c in ["Total Sales Qty", "Total Freq"]]
             if total_cols:
                 styled_df = styled_df.map(lambda _: 'background-color: #ccffcc; color: black;', subset=total_cols)
                 
-            # 4. Area Sales Qty (Light Orange)
             sales_qty_cols = [c for c in final_df.columns if "Sales Qty" in c and c not in ["Total Sales Qty"]]
             if sales_qty_cols:
                 styled_df = styled_df.map(lambda _: 'background-color: #ffe6cc; color: black;', subset=sales_qty_cols)
                 
-            # 5. Area Stock (Light Purple) - NEW
             stock_cols = [c for c in final_df.columns if "Stock" in c]
             if stock_cols:
                 styled_df = styled_df.map(lambda _: 'background-color: #e6ccff; color: black;', subset=stock_cols)
                 
-            # 6. Area Freq (Light Blue)
             freq_cols = [c for c in final_df.columns if "Freq" in c and c not in ["Total Freq"]]
             if freq_cols:
                 styled_df = styled_df.map(lambda _: 'background-color: #cce5ff; color: black;', subset=freq_cols)
                 
-            # Show styled dataframe in Streamlit
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
             
             # --- DOWNLOAD AS EXCEL BUTTON ---
