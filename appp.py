@@ -165,7 +165,7 @@ with st.sidebar:
                         header_idx = idx
                         break
                 stock_file.seek(0)
-                stock_data = pd.read_csv(stock_file, header=header_idx)
+                stock_data = pd.read_csv(stock_file, header=header_idx, dtype=str)
             else:
                 preview_df = pd.read_excel(stock_file, header=None, nrows=25)
                 for idx, row in preview_df.iterrows():
@@ -174,7 +174,7 @@ with st.sidebar:
                         header_idx = idx
                         break
                 stock_file.seek(0)
-                stock_data = pd.read_excel(stock_file, header=header_idx)
+                stock_data = pd.read_excel(stock_file, header=header_idx, dtype=str)
                 
             stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
             
