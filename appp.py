@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import io
 import os
+import gc
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -12,7 +13,7 @@ st.set_page_config(layout="wide", page_title="Sales & Stock Qty Checker")
 GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
 LOCAL_STOCK_FILE = "stock.parquet"
 
-# --- BULLETPROOF DATA LOADING ---
+# --- BULLETPROOF & MEMORY-EFFICIENT DATA LOADING ---
 @st.cache_data(ttl=3600)
 def load_fast_data():
     try:
@@ -24,20 +25,30 @@ def load_fast_data():
         if 'Invoice Date' not in df.columns:
             possible_cols = [col for col in df.columns if 'date' in col.lower()]
             if possible_cols:
-                actual_date_col = possible_cols[0]
-                df.rename(columns={actual_date_col: 'Invoice Date'}, inplace=True)
+                df.rename(columns={possible_cols[0]: 'Invoice Date'}, inplace=True)
             else:
-                st.error(f"CRITICAL ERROR: No date column found! Columns: {df.columns.tolist()}")
+                st.error("CRITICAL ERROR: No date column found!")
                 
         if 'Invoice Date' in df.columns:
             df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
+            
+        # PRE-CLEAN: Do this once on load to save massive RAM later
+        if 'PartNumber' in df.columns:
+            df['PartNumber'] = df['PartNumber'].astype(str).str.strip().str.upper()
+            
+        # PRE-CLEAN: Apply Neyveli override immediately
+        dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
+        if dealer_col and 'Area' in df.columns:
+            target_dealers = ['693605', '693606', '693608']
+            mask_dealers = df[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
+            df.loc[mask_dealers, 'Area'] = 'Neyveli'
             
         return df
     except Exception as e:
         st.error(f"Error loading hosted data: {e}")
         return pd.DataFrame()
 
-# Initialize session states
+# Initialize session states (NO COPIES)
 if 'master_df' not in st.session_state:
     st.session_state.master_df = load_fast_data()
 
@@ -76,10 +87,8 @@ st.title("📦 Parts Order, Sales & Stock Analysis")
 
 # 1. Sidebar - Data Upload & Filters
 with st.sidebar:
-    # --- ROBUST LATEST SALES DATE DISPLAY ---
     if not st.session_state.master_df.empty and 'Invoice Date' in st.session_state.master_df.columns:
-        safe_sales_dates = pd.to_datetime(st.session_state.master_df['Invoice Date'], errors='coerce')
-        latest_date = safe_sales_dates.max()
+        latest_date = st.session_state.master_df['Invoice Date'].max()
         if pd.notna(latest_date):
             st.success(f"📅 Latest Sales Data: **{latest_date.strftime('%B %Y')}**")
     
@@ -106,6 +115,16 @@ with st.sidebar:
             if 'Cost' in new_data.columns:
                 new_data['Cost'] = pd.to_numeric(new_data['Cost'], errors='coerce').fillna(0)
                 
+            # PRE-CLEAN APPENDED DATA
+            if 'PartNumber' in new_data.columns:
+                new_data['PartNumber'] = new_data['PartNumber'].astype(str).str.strip().str.upper()
+                
+            dealer_col = next((c for c in new_data.columns if 'dealer' in c.lower()), None)
+            if dealer_col and 'Area' in new_data.columns:
+                target_dealers = ['693605', '693606', '693608']
+                mask_dealers = new_data[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
+                new_data.loc[mask_dealers, 'Area'] = 'Neyveli'
+                
             st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
             st.success("New sales data appended successfully!")
         except Exception as e:
@@ -118,7 +137,6 @@ with st.sidebar:
     if not st.session_state.stock_df.empty:
         st.info("✅ A cached Stock file is currently loaded in the system.")
         
-        # --- ROBUST LATEST STOCK DATE DISPLAY ---
         stock_date_cols = [c for c in st.session_state.stock_df.columns if 'date' in c.lower()]
         max_stock_date = pd.NaT
         for c in stock_date_cols:
@@ -138,43 +156,44 @@ with st.sidebar:
         try:
             header_idx = 0
             
-            # --- THE FIX: BULLETPROOF TEXT SCANNER FOR CSVs ---
             if stock_file.name.endswith('.csv'):
                 stock_file.seek(0)
-                # Read first 25 lines as plain text to avoid pandas Tokenizing crashing
                 lines = stock_file.readlines()[:25]
                 for idx, line in enumerate(lines):
-                    try:
-                        decoded_row = line.decode('utf-8', errors='ignore').lower()
-                    except:
-                        decoded_row = str(line).lower()
-                        
+                    decoded_row = line.decode('utf-8', errors='ignore').lower() if isinstance(line, bytes) else str(line).lower()
                     if 'part no' in decoded_row or 'stock' in decoded_row or 'main dealer' in decoded_row:
                         header_idx = idx
                         break
-                
-                # Now that we know exactly where the header is, safely pass it to pandas
                 stock_file.seek(0)
-                stock_data = pd.read_csv(stock_file, header=header_idx, dtype=str)
-                
+                stock_data = pd.read_csv(stock_file, header=header_idx)
             else:
-                # Excel handles weird grid sizes fine natively
                 preview_df = pd.read_excel(stock_file, header=None, nrows=25)
                 for idx, row in preview_df.iterrows():
                     row_str = [str(x).strip().lower() for x in row.values]
-                    if 'part no' in row_str or 'stock' in row_str or 'main dealer-1' in row_str or 'main dealer' in row_str:
+                    if 'part no' in row_str or 'stock' in row_str or 'main dealer' in row_str:
                         header_idx = idx
                         break
                 stock_file.seek(0)
-                stock_data = pd.read_excel(stock_file, header=header_idx, dtype=str)
+                stock_data = pd.read_excel(stock_file, header=header_idx)
                 
-            stock_data = stock_data.astype(str)
             stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
+            
+            # MEMORY OPTIMIZATION: Only convert specific columns to string/numeric to save RAM
+            part_col = next((c for c in stock_data.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), next((c for c in stock_data.columns if 'part' in c.lower()), None))
+            qty_col = next((c for c in stock_data.columns if c.strip().lower() == 'stock'), next((c for c in stock_data.columns if 'stock' in c.lower() or 'qty' in c.lower()), None))
+            dealer_col = next((c for c in stock_data.columns if 'main dealer' in c.lower()), next((c for c in stock_data.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None))
+            
+            if part_col:
+                stock_data[part_col] = stock_data[part_col].astype(str).str.strip().str.upper()
+            if qty_col:
+                stock_data[qty_col] = pd.to_numeric(stock_data[qty_col], errors='coerce').fillna(0)
+            if dealer_col:
+                stock_data[dealer_col] = stock_data[dealer_col].astype(str).str.strip().str.lower()
             
             stock_data.to_parquet(LOCAL_STOCK_FILE, index=False)
             st.session_state.stock_df = stock_data
             
-            st.success("New stock list loaded and cached as Parquet!")
+            st.success("New stock list loaded and cached!")
             st.rerun()
                 
         except Exception as e:
@@ -213,33 +232,26 @@ with col1:
     edited_df = st.data_editor(
         st.session_state.input_grid, 
         num_rows="dynamic",
-        width="stretch", # <-- SWAPPED
+        width="stretch", 
         hide_index=True,
         key=f"editor_{st.session_state.editor_key}"
     )
 with col2:
-    st.button("Clear List", on_click=clear_list, width="stretch") # <-- SWAPPED
+    st.button("Clear List", on_click=clear_list, width="stretch")
 
 # 3. Processing and Output
 if st.button("Analyze Parts", type="primary"):
-    df = st.session_state.master_df.copy() 
-    sdf = st.session_state.stock_df.copy()
+    # DIRECT REFERENCE - NO MEMORY COPYING
+    df = st.session_state.master_df 
+    sdf = st.session_state.stock_df
     
     has_stock = not sdf.empty
     
     stock_part_col, stock_qty_col, stock_dealer_col = None, None, None
     if has_stock:
-        stock_part_col = next((c for c in sdf.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), None)
-        if not stock_part_col:
-            stock_part_col = next((c for c in sdf.columns if 'part' in c.lower()), None)
-            
-        stock_qty_col = next((c for c in sdf.columns if c.strip().lower() == 'stock'), None)
-        if not stock_qty_col:
-            stock_qty_col = next((c for c in sdf.columns if 'stock' in c.lower() or 'qty' in c.lower()), None)
-            
-        stock_dealer_col = next((c for c in sdf.columns if 'main dealer' in c.lower()), None)
-        if not stock_dealer_col:
-            stock_dealer_col = next((c for c in sdf.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None)
+        stock_part_col = next((c for c in sdf.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), next((c for c in sdf.columns if 'part' in c.lower()), None))
+        stock_qty_col = next((c for c in sdf.columns if c.strip().lower() == 'stock'), next((c for c in sdf.columns if 'stock' in c.lower() or 'qty' in c.lower()), None))
+        stock_dealer_col = next((c for c in sdf.columns if 'main dealer' in c.lower()), next((c for c in sdf.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None))
         
         if not (stock_part_col and stock_qty_col and stock_dealer_col):
             st.warning("Stock File uploaded, but couldn't completely detect columns. Stock checks may be skipped.")
@@ -248,23 +260,12 @@ if st.button("Analyze Parts", type="primary"):
     if df.empty:
         st.error("The base sales database is currently empty. Please verify your source file.")
     else:
-        with st.spinner("Optimizing and scanning database..."):
-            df['SearchPart'] = df['PartNumber'].astype(str).str.strip().str.upper()
+        with st.spinner("Analyzing data safely..."):
             
-            dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
-            if dealer_col and 'Area' in df.columns:
-                target_dealers = ['693605', '693606', '693608']
-                mask_dealers = df[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
-                df.loc[mask_dealers, 'Area'] = 'Neyveli'
-            
+            # Create a lightweight sliced view for the dates
             mask_global = (pd.to_datetime(df['Invoice Date'], errors='coerce') >= pd.to_datetime(start_date)) & \
                           (pd.to_datetime(df['Invoice Date'], errors='coerce') <= pd.to_datetime(end_date))
             df_filtered = df.loc[mask_global]
-
-            if has_stock:
-                sdf['SearchPart'] = sdf[stock_part_col].astype(str).str.strip().str.upper()
-                sdf['SearchDealer'] = sdf[stock_dealer_col].astype(str).str.strip().str.lower()
-                sdf['NumericQty'] = pd.to_numeric(sdf[stock_qty_col], errors='coerce').fillna(0)
             
             query_parts = edited_df[edited_df["PartNumber"].astype(str).str.strip() != ""]
             
@@ -288,8 +289,9 @@ if st.button("Analyze Parts", type="primary"):
                     except:
                         order_qty = 0
                     
-                    part_data = df[df['SearchPart'] == p_num_clean]
-                    part_data_filtered = df_filtered[df_filtered['SearchPart'] == p_num_clean]
+                    # Direct lookup since we pre-cleaned on upload
+                    part_data = df[df['PartNumber'] == p_num_clean]
+                    part_data_filtered = df_filtered[df_filtered['PartNumber'] == p_num_clean]
                     
                     if part_data.empty:
                         desc = "Not Found"
@@ -340,7 +342,7 @@ if st.button("Analyze Parts", type="primary"):
                     
                     stock_matches = pd.DataFrame()
                     if has_stock:
-                        stock_matches = sdf[sdf['SearchPart'].str.endswith(p_num_clean)]
+                        stock_matches = sdf[sdf[stock_part_col].str.endswith(p_num_clean, na=False)]
                     
                     for area in target_areas:
                         if not part_data_filtered.empty and 'Area' in part_data_filtered.columns:
@@ -354,11 +356,11 @@ if st.button("Analyze Parts", type="primary"):
                         area_stock_val = 0
                         if has_stock and not stock_matches.empty:
                             if area.lower() == 'hoskote':
-                                mask_stock_area = stock_matches['SearchDealer'].isin(['hoskote', 'bangalore'])
+                                mask_stock_area = stock_matches[stock_dealer_col].isin(['hoskote', 'bangalore'])
                             else:
-                                mask_stock_area = stock_matches['SearchDealer'] == area.lower()
+                                mask_stock_area = stock_matches[stock_dealer_col] == area.lower()
                                 
-                            area_stock_val = stock_matches.loc[mask_stock_area, 'NumericQty'].sum()
+                            area_stock_val = stock_matches.loc[mask_stock_area, stock_qty_col].sum()
                             
                         row_result[f"{area} Stock"] = int(area_stock_val)
                     
@@ -402,7 +404,11 @@ if st.button("Analyze Parts", type="primary"):
                 if freq_cols:
                     styled_df = styled_df.map(lambda _: 'background-color: #cce5ff; color: black;', subset=freq_cols)
                     
-                st.dataframe(styled_df, width="stretch", hide_index=True) # <-- SWAPPED
+                st.dataframe(styled_df, width="stretch", hide_index=True)
+                
+                # Manual Garbage Collection to free up Streamlit Server RAM instantly
+                del df_filtered
+                gc.collect()
                 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
