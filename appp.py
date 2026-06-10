@@ -213,12 +213,12 @@ with col1:
     edited_df = st.data_editor(
         st.session_state.input_grid, 
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch", # <-- SWAPPED
         hide_index=True,
         key=f"editor_{st.session_state.editor_key}"
     )
 with col2:
-    st.button("Clear List", on_click=clear_list, use_container_width=True)
+    st.button("Clear List", on_click=clear_list, width="stretch") # <-- SWAPPED
 
 # 3. Processing and Output
 if st.button("Analyze Parts", type="primary"):
@@ -402,7 +402,7 @@ if st.button("Analyze Parts", type="primary"):
                 if freq_cols:
                     styled_df = styled_df.map(lambda _: 'background-color: #cce5ff; color: black;', subset=freq_cols)
                     
-                st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                st.dataframe(styled_df, width="stretch", hide_index=True) # <-- SWAPPED
                 
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
