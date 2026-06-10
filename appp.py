@@ -95,40 +95,45 @@ with st.sidebar:
     st.header("1. Upload Sales Data")
     uploaded_file = st.file_uploader("Upload CSV/Excel to append to sales database", type=['csv', 'xlsx', 'xls'])
     if uploaded_file:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                new_data = pd.read_csv(uploaded_file, dtype=str) 
-            else:
-                new_data = pd.read_excel(uploaded_file, dtype=str) 
-                
-            new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
-            
-            for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
-                if variant in new_data.columns and 'Invoice Date' not in new_data.columns:
-                    new_data.rename(columns={variant: 'Invoice Date'}, inplace=True)
+        # --- EXPLICIT UPLOAD BUTTON FOR SALES DATA ---
+        if st.button("📥 Confirm & Append Sales Data", type="primary", width="stretch"):
+            with st.spinner("Processing new sales data..."):
+                try:
+                    if uploaded_file.name.endswith('.csv'):
+                        new_data = pd.read_csv(uploaded_file, dtype=str) 
+                    else:
+                        new_data = pd.read_excel(uploaded_file, dtype=str) 
+                        
+                    new_data.columns = new_data.columns.astype(str).str.strip().str.replace('"', '', regex=False)
                     
-            if 'Invoice Date' in new_data.columns:
-                new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
-                
-            if 'qty' in new_data.columns:
-                new_data['qty'] = pd.to_numeric(new_data['qty'], errors='coerce').fillna(0)
-            if 'Cost' in new_data.columns:
-                new_data['Cost'] = pd.to_numeric(new_data['Cost'], errors='coerce').fillna(0)
-                
-            # PRE-CLEAN APPENDED DATA
-            if 'PartNumber' in new_data.columns:
-                new_data['PartNumber'] = new_data['PartNumber'].astype(str).str.strip().str.upper()
-                
-            dealer_col = next((c for c in new_data.columns if 'dealer' in c.lower()), None)
-            if dealer_col and 'Area' in new_data.columns:
-                target_dealers = ['693605', '693606', '693608']
-                mask_dealers = new_data[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
-                new_data.loc[mask_dealers, 'Area'] = 'Neyveli'
-                
-            st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
-            st.success("New sales data appended successfully!")
-        except Exception as e:
-            st.error(f"Error loading sales file: {e}")
+                    for variant in ['Invoice_Date', 'InvoiceDate', 'INVOICE DATE']:
+                        if variant in new_data.columns and 'Invoice Date' not in new_data.columns:
+                            new_data.rename(columns={variant: 'Invoice Date'}, inplace=True)
+                            
+                    if 'Invoice Date' in new_data.columns:
+                        new_data['Invoice Date'] = pd.to_datetime(new_data['Invoice Date'], errors='coerce')
+                        
+                    if 'qty' in new_data.columns:
+                        new_data['qty'] = pd.to_numeric(new_data['qty'], errors='coerce').fillna(0)
+                    if 'Cost' in new_data.columns:
+                        new_data['Cost'] = pd.to_numeric(new_data['Cost'], errors='coerce').fillna(0)
+                        
+                    # PRE-CLEAN APPENDED DATA
+                    if 'PartNumber' in new_data.columns:
+                        new_data['PartNumber'] = new_data['PartNumber'].astype(str).str.strip().str.upper()
+                        
+                    dealer_col = next((c for c in new_data.columns if 'dealer' in c.lower()), None)
+                    if dealer_col and 'Area' in new_data.columns:
+                        target_dealers = ['693605', '693606', '693608']
+                        mask_dealers = new_data[dealer_col].astype(str).str.strip().str.replace('.0', '', regex=False).isin(target_dealers)
+                        new_data.loc[mask_dealers, 'Area'] = 'Neyveli'
+                        
+                    st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
+                    st.success("New sales data appended successfully!")
+                    time.sleep(1) # Give user a second to read success message before UI clears
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error loading sales file: {e}")
     
     st.markdown("---")
     
@@ -153,51 +158,55 @@ with st.sidebar:
         
     stock_file = st.file_uploader("Upload NEW Stock List to replace old one (CSV/Excel)", type=['csv', 'xlsx'])
     if stock_file:
-        try:
-            header_idx = 0
-            
-            if stock_file.name.endswith('.csv'):
-                stock_file.seek(0)
-                lines = stock_file.readlines()[:25]
-                for idx, line in enumerate(lines):
-                    decoded_row = line.decode('utf-8', errors='ignore').lower() if isinstance(line, bytes) else str(line).lower()
-                    if 'part no' in decoded_row or 'stock' in decoded_row or 'main dealer' in decoded_row:
-                        header_idx = idx
-                        break
-                stock_file.seek(0)
-                stock_data = pd.read_csv(stock_file, header=header_idx, dtype=str)
-            else:
-                preview_df = pd.read_excel(stock_file, header=None, nrows=25)
-                for idx, row in preview_df.iterrows():
-                    row_str = [str(x).strip().lower() for x in row.values]
-                    if 'part no' in row_str or 'stock' in row_str or 'main dealer' in row_str:
-                        header_idx = idx
-                        break
-                stock_file.seek(0)
-                stock_data = pd.read_excel(stock_file, header=header_idx, dtype=str)
-                
-            stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
-            
-            # MEMORY OPTIMIZATION: Only convert specific columns to string/numeric to save RAM
-            part_col = next((c for c in stock_data.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), next((c for c in stock_data.columns if 'part' in c.lower()), None))
-            qty_col = next((c for c in stock_data.columns if c.strip().lower() == 'stock'), next((c for c in stock_data.columns if 'stock' in c.lower() or 'qty' in c.lower()), None))
-            dealer_col = next((c for c in stock_data.columns if 'main dealer' in c.lower()), next((c for c in stock_data.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None))
-            
-            if part_col:
-                stock_data[part_col] = stock_data[part_col].astype(str).str.strip().str.upper()
-            if qty_col:
-                stock_data[qty_col] = pd.to_numeric(stock_data[qty_col], errors='coerce').fillna(0)
-            if dealer_col:
-                stock_data[dealer_col] = stock_data[dealer_col].astype(str).str.strip().str.lower()
-            
-            stock_data.to_parquet(LOCAL_STOCK_FILE, index=False)
-            st.session_state.stock_df = stock_data
-            
-            st.success("New stock list loaded and cached!")
-            st.rerun()
-                
-        except Exception as e:
-            st.error(f"Error loading stock file: {e}")
+        # --- EXPLICIT UPLOAD BUTTON FOR STOCK DATA ---
+        if st.button("📥 Confirm & Cache Stock Data", type="primary", width="stretch"):
+            with st.spinner("Processing stock data..."):
+                try:
+                    header_idx = 0
+                    
+                    if stock_file.name.endswith('.csv'):
+                        stock_file.seek(0)
+                        lines = stock_file.readlines()[:25]
+                        for idx, line in enumerate(lines):
+                            decoded_row = line.decode('utf-8', errors='ignore').lower() if isinstance(line, bytes) else str(line).lower()
+                            if 'part no' in decoded_row or 'stock' in decoded_row or 'main dealer' in decoded_row:
+                                header_idx = idx
+                                break
+                        stock_file.seek(0)
+                        stock_data = pd.read_csv(stock_file, header=header_idx)
+                    else:
+                        preview_df = pd.read_excel(stock_file, header=None, nrows=25)
+                        for idx, row in preview_df.iterrows():
+                            row_str = [str(x).strip().lower() for x in row.values]
+                            if 'part no' in row_str or 'stock' in row_str or 'main dealer' in row_str:
+                                header_idx = idx
+                                break
+                        stock_file.seek(0)
+                        stock_data = pd.read_excel(stock_file, header=header_idx)
+                        
+                    stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
+                    
+                    # MEMORY OPTIMIZATION: Only convert specific columns to string/numeric to save RAM
+                    part_col = next((c for c in stock_data.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), next((c for c in stock_data.columns if 'part' in c.lower()), None))
+                    qty_col = next((c for c in stock_data.columns if c.strip().lower() == 'stock'), next((c for c in stock_data.columns if 'stock' in c.lower() or 'qty' in c.lower()), None))
+                    dealer_col = next((c for c in stock_data.columns if 'main dealer' in c.lower()), next((c for c in stock_data.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None))
+                    
+                    if part_col:
+                        stock_data[part_col] = stock_data[part_col].astype(str).str.strip().str.upper()
+                    if qty_col:
+                        stock_data[qty_col] = pd.to_numeric(stock_data[qty_col], errors='coerce').fillna(0)
+                    if dealer_col:
+                        stock_data[dealer_col] = stock_data[dealer_col].astype(str).str.strip().str.lower()
+                    
+                    stock_data.to_parquet(LOCAL_STOCK_FILE, index=False)
+                    st.session_state.stock_df = stock_data
+                    
+                    st.success("New stock list loaded and cached!")
+                    time.sleep(1) # Give user a second to read success message before UI clears
+                    st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"Error loading stock file: {e}")
 
     st.markdown("---")
             
