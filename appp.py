@@ -59,7 +59,7 @@ if 'stock_df' not in st.session_state:
         bust_url = f"{GITHUB_STOCK_URL}?v={int(time.time())}"
         st.session_state.stock_df = pd.read_parquet(bust_url)
     except Exception:
-        # Fallback to local cache if GitHub fetch fails (e.g., file doesn't exist yet)
+        # Fallback to local cache if GitHub fetch fails
         if os.path.exists(LOCAL_STOCK_FILE):
             try:
                 st.session_state.stock_df = pd.read_parquet(LOCAL_STOCK_FILE)
@@ -207,7 +207,8 @@ with st.sidebar:
                                 header_idx = idx
                                 break
                         stock_file.seek(0)
-                        stock_data = pd.read_csv(stock_file, header=header_idx)
+                        # THE FIX: Added dtype=str here
+                        stock_data = pd.read_csv(stock_file, header=header_idx, dtype=str)
                     else:
                         preview_df = pd.read_excel(stock_file, header=None, nrows=25)
                         for idx, row in preview_df.iterrows():
@@ -216,7 +217,8 @@ with st.sidebar:
                                 header_idx = idx
                                 break
                         stock_file.seek(0)
-                        stock_data = pd.read_excel(stock_file, header=header_idx)
+                        # THE FIX: Added dtype=str here
+                        stock_data = pd.read_excel(stock_file, header=header_idx, dtype=str)
                         
                     stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
                     
