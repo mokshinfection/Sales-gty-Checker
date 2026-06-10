@@ -10,7 +10,9 @@ from dateutil.relativedelta import relativedelta
 # --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Sales & Stock Qty Checker")
 
-GITHUB_PARQUET_URL = "https://github.com/mokshinfection/Sales-gty-Checker/raw/main/sales.parquet"
+GITHUB_REPO_NAME = "mokshinfection/Sales-gty-Checker"
+GITHUB_PARQUET_URL = f"https://github.com/{GITHUB_REPO_NAME}/raw/main/sales.parquet"
+GITHUB_STOCK_URL = f"https://github.com/{GITHUB_REPO_NAME}/raw/main/stock.parquet"
 LOCAL_STOCK_FILE = "stock.parquet"
 
 # --- BULLETPROOF & MEMORY-EFFICIENT DATA LOADING ---
@@ -32,11 +34,9 @@ def load_fast_data():
         if 'Invoice Date' in df.columns:
             df['Invoice Date'] = pd.to_datetime(df['Invoice Date'], errors='coerce')
             
-        # PRE-CLEAN: Do this once on load to save massive RAM later
         if 'PartNumber' in df.columns:
             df['PartNumber'] = df['PartNumber'].astype(str).str.strip().str.upper()
             
-        # PRE-CLEAN: Apply Neyveli override immediately
         dealer_col = next((c for c in df.columns if 'dealer' in c.lower()), None)
         if dealer_col and 'Area' in df.columns:
             target_dealers = ['693605', '693606', '693608']
@@ -48,19 +48,25 @@ def load_fast_data():
         st.error(f"Error loading hosted data: {e}")
         return pd.DataFrame()
 
-# Initialize session states (NO COPIES)
+# Initialize session states
 if 'master_df' not in st.session_state:
     st.session_state.master_df = load_fast_data()
 
-# --- AUTO-LOAD LOCAL STOCK PARQUET ---
+# --- FETCH STOCK PARQUET FROM GITHUB ---
 if 'stock_df' not in st.session_state:
-    if os.path.exists(LOCAL_STOCK_FILE):
-        try:
-            st.session_state.stock_df = pd.read_parquet(LOCAL_STOCK_FILE)
-        except:
+    try:
+        # Try to pull from GitHub first
+        bust_url = f"{GITHUB_STOCK_URL}?v={int(time.time())}"
+        st.session_state.stock_df = pd.read_parquet(bust_url)
+    except Exception:
+        # Fallback to local cache if GitHub fetch fails (e.g., file doesn't exist yet)
+        if os.path.exists(LOCAL_STOCK_FILE):
+            try:
+                st.session_state.stock_df = pd.read_parquet(LOCAL_STOCK_FILE)
+            except:
+                st.session_state.stock_df = pd.DataFrame()
+        else:
             st.session_state.stock_df = pd.DataFrame()
-    else:
-        st.session_state.stock_df = pd.DataFrame()
 
 if 'input_grid' not in st.session_state:
     st.session_state.input_grid = pd.DataFrame(columns=["PartNumber", "Order Qty"], data=[["", 0] for _ in range(5)])
@@ -82,6 +88,37 @@ def style_trend_text(val):
         return 'background-color: #ccffcc; color: black;'
     return ""
 
+def push_stock_to_github(dataframe):
+    """Pushes the dataframe to GitHub as stock.parquet. Falls back to local if no token."""
+    # Always save locally just in case
+    dataframe.to_parquet(LOCAL_STOCK_FILE, index=False)
+    
+    if "GITHUB_TOKEN" in st.secrets:
+        try:
+            from github import Github
+            g = Github(st.secrets["GITHUB_TOKEN"])
+            repo = g.get_repo(GITHUB_REPO_NAME)
+            
+            buffer = io.BytesIO()
+            dataframe.to_parquet(buffer, index=False)
+            file_content = buffer.getvalue()
+            
+            try:
+                # Update existing file
+                contents = repo.get_contents("stock.parquet")
+                repo.update_file(contents.path, "Auto-update stock.parquet via Streamlit", file_content, contents.sha)
+                st.success("☁️ Successfully pushed new Stock data to GitHub repository!")
+            except Exception:
+                # Create file if it doesn't exist
+                repo.create_file("stock.parquet", "Initial stock.parquet upload via Streamlit", file_content)
+                st.success("☁️ Successfully created Stock data in GitHub repository!")
+        except ImportError:
+            st.warning("PyGithub is not installed. Please add PyGithub==2.3.0 to your requirements.txt. Saved locally instead.")
+        except Exception as e:
+            st.error(f"Failed to push to GitHub. Saved locally instead. Error: {e}")
+    else:
+        st.info("💾 Saved locally to temporary cache. To permanently save to GitHub, add a GITHUB_TOKEN in Streamlit Secrets.")
+
 # --- UI LAYOUT ---
 st.title("📦 Parts Order, Sales & Stock Analysis")
 
@@ -95,7 +132,6 @@ with st.sidebar:
     st.header("1. Upload Sales Data")
     uploaded_file = st.file_uploader("Upload CSV/Excel to append to sales database", type=['csv', 'xlsx', 'xls'])
     if uploaded_file:
-        # --- EXPLICIT UPLOAD BUTTON FOR SALES DATA ---
         if st.button("📥 Confirm & Append Sales Data", type="primary", width="stretch"):
             with st.spinner("Processing new sales data..."):
                 try:
@@ -118,7 +154,6 @@ with st.sidebar:
                     if 'Cost' in new_data.columns:
                         new_data['Cost'] = pd.to_numeric(new_data['Cost'], errors='coerce').fillna(0)
                         
-                    # PRE-CLEAN APPENDED DATA
                     if 'PartNumber' in new_data.columns:
                         new_data['PartNumber'] = new_data['PartNumber'].astype(str).str.strip().str.upper()
                         
@@ -130,7 +165,7 @@ with st.sidebar:
                         
                     st.session_state.master_df = pd.concat([st.session_state.master_df, new_data], ignore_index=True)
                     st.success("New sales data appended successfully!")
-                    time.sleep(1) # Give user a second to read success message before UI clears
+                    time.sleep(1)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error loading sales file: {e}")
@@ -158,9 +193,8 @@ with st.sidebar:
         
     stock_file = st.file_uploader("Upload NEW Stock List to replace old one (CSV/Excel)", type=['csv', 'xlsx'])
     if stock_file:
-        # --- EXPLICIT UPLOAD BUTTON FOR STOCK DATA ---
-        if st.button("📥 Confirm & Cache Stock Data", type="primary", width="stretch"):
-            with st.spinner("Processing stock data..."):
+        if st.button("📥 Confirm & Save Stock to GitHub", type="primary", width="stretch"):
+            with st.spinner("Processing and pushing stock data to repository..."):
                 try:
                     header_idx = 0
                     
@@ -186,7 +220,6 @@ with st.sidebar:
                         
                     stock_data.columns = stock_data.columns.astype(str).str.strip().str.replace('"', '', regex=False).str.replace('\n', '', regex=False)
                     
-                    # MEMORY OPTIMIZATION: Only convert specific columns to string/numeric to save RAM
                     part_col = next((c for c in stock_data.columns if c.strip().lower() in ['part no', 'codepart', 'partnumber']), next((c for c in stock_data.columns if 'part' in c.lower()), None))
                     qty_col = next((c for c in stock_data.columns if c.strip().lower() == 'stock'), next((c for c in stock_data.columns if 'stock' in c.lower() or 'qty' in c.lower()), None))
                     dealer_col = next((c for c in stock_data.columns if 'main dealer' in c.lower()), next((c for c in stock_data.columns if ('dealer' in c.lower() and 'id' not in c.lower()) or 'location' in c.lower()), None))
@@ -198,11 +231,13 @@ with st.sidebar:
                     if dealer_col:
                         stock_data[dealer_col] = stock_data[dealer_col].astype(str).str.strip().str.lower()
                     
-                    stock_data.to_parquet(LOCAL_STOCK_FILE, index=False)
+                    # Store in session state
                     st.session_state.stock_df = stock_data
                     
-                    st.success("New stock list loaded and cached!")
-                    time.sleep(1) # Give user a second to read success message before UI clears
+                    # Push to GitHub
+                    push_stock_to_github(stock_data)
+                    
+                    time.sleep(2)
                     st.rerun()
                         
                 except Exception as e:
@@ -250,7 +285,6 @@ with col2:
 
 # 3. Processing and Output
 if st.button("Analyze Parts", type="primary"):
-    # DIRECT REFERENCE - NO MEMORY COPYING
     df = st.session_state.master_df 
     sdf = st.session_state.stock_df
     
@@ -271,7 +305,6 @@ if st.button("Analyze Parts", type="primary"):
     else:
         with st.spinner("Analyzing data safely..."):
             
-            # Create a lightweight sliced view for the dates
             mask_global = (pd.to_datetime(df['Invoice Date'], errors='coerce') >= pd.to_datetime(start_date)) & \
                           (pd.to_datetime(df['Invoice Date'], errors='coerce') <= pd.to_datetime(end_date))
             df_filtered = df.loc[mask_global]
@@ -298,7 +331,6 @@ if st.button("Analyze Parts", type="primary"):
                     except:
                         order_qty = 0
                     
-                    # Direct lookup since we pre-cleaned on upload
                     part_data = df[df['PartNumber'] == p_num_clean]
                     part_data_filtered = df_filtered[df_filtered['PartNumber'] == p_num_clean]
                     
@@ -415,7 +447,6 @@ if st.button("Analyze Parts", type="primary"):
                     
                 st.dataframe(styled_df, width="stretch", hide_index=True)
                 
-                # Manual Garbage Collection to free up Streamlit Server RAM instantly
                 del df_filtered
                 gc.collect()
                 
