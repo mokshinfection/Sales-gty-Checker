@@ -3,3 +3,4 @@ pandas
 py7zr
 requests
 openpyxl
+PyGithub==2.3.0
